@@ -15,7 +15,7 @@
 - `src.embedding.EmbeddingService`：生成文档和查询向量。
 - `src.retriever.SemanticRetriever`：返回按相似度降序排列的 Top-K 原文。
 
-FastAPI 应用在启动阶段读取 `data/knowledge.txt`、切块、创建一个 `EmbeddingService`、批量生成文档向量并创建一个 `SemanticRetriever`。初始化结果保存在应用状态中，在所有请求之间复用，避免每次请求重复加载模型或重建索引。
+FastAPI 应用在启动阶段读取 `data/knowledge.txt`、切块、创建一个 `EmbeddingService`、批量生成文档向量并创建一个 `SemanticRetriever`。应用状态明确保存 `embedding_service`、`retriever` 和 `chunk_count`，在所有请求之间复用，避免每次请求重复加载模型或重建索引。
 
 `src/main.py` 的命令行行为不变。API 不复制检索算法，也不把命令行输入输出逻辑带入 Web 层。
 
@@ -81,7 +81,7 @@ data/knowledge.txt
     → split_text
     → EmbeddingService.encode_documents
     → SemanticRetriever
-    → 保存到 FastAPI 应用状态
+    → 保存 embedding_service、retriever、chunk_count 到应用状态
 ```
 
 请求阶段：
