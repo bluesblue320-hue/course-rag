@@ -1,0 +1,31 @@
+# Virtual environments
+.venv/
+venv/
+env/
+.worktrees/
+
+# Python caches and build outputs
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Model and application caches
+.cache/
+.huggingface/
+models/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
