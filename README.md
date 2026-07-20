@@ -11,10 +11,12 @@
 - 使用 NumPy 手动计算余弦相似度
 - 输出 Top 3、四位小数分数、Chunk 编号和原文
 - 使用 pytest 离线测试核心逻辑
+- 通过 FastAPI 提供健康检查和 Top-K 检索接口
+- 在服务启动时构建一次索引，并在请求之间复用
 
 ## 当前没有实现
 
-本阶段没有调用大语言模型生成答案，也没有 Web API、数据库、向量数据库、LangChain、LangGraph、Agent 或前端。程序只负责检索原文。
+本阶段没有调用大语言模型生成答案，也没有数据库、向量数据库、LangChain、LangGraph、Agent 或前端。命令行和 Web API 都只负责返回检索原文。
 
 ## 项目目录
 
@@ -22,6 +24,7 @@
 course-rag/
 ├── data/knowledge.txt        # 中文示例知识库
 ├── src/
+│   ├── api.py                # FastAPI Web 接口
 │   ├── loader.py             # 读取文本
 │   ├── chunker.py            # 切分文本
 │   ├── embedding.py          # 生成向量
@@ -66,6 +69,32 @@ python -m src.main
 ```
 
 输入 `exit`、`quit` 或直接按回车即可退出。输出中的 `Chunk编号` 从 0 开始，与 Python 列表索引一致。
+
+## 启动 FastAPI
+
+在项目根目录执行：
+
+```powershell
+uvicorn src.api:app --reload
+```
+
+服务启动后可以打开 Swagger UI：`http://127.0.0.1:8000/docs`。
+
+健康检查：
+
+```powershell
+curl.exe http://127.0.0.1:8000/health
+```
+
+检索请求：
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/search `
+  -H "Content-Type: application/json" `
+  -d '{"query":"业务逻辑应该写在哪里？","top_k":3}'
+```
+
+`query` 不能为空，`top_k` 默认是 `3` 且必须大于 `0`。接口返回按相似度降序排列的原文、分数、排名和 Chunk 编号。
 
 ## 运行测试
 
