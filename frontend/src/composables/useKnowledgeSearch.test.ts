@@ -71,7 +71,7 @@ describe("useKnowledgeSearch", () => {
     expect(search.state.value).toEqual({
       status: "error",
       query: "业务逻辑",
-      message: "搜索失败，请稍后重试",
+      message: "检索失败，请稍后重试",
     })
   })
 
@@ -89,7 +89,7 @@ describe("useKnowledgeSearch", () => {
     expect(search.state.value).toEqual({
       status: "error",
       query: "业务逻辑",
-      message: "搜索结果格式不正确",
+      message: "检索结果格式不正确",
     })
   })
 

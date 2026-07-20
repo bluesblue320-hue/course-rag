@@ -10,7 +10,7 @@ function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message
   }
-  return "搜索失败，请稍后重试"
+  return "检索失败，请稍后重试"
 }
 
 export function useKnowledgeSearch(service: SearchService) {
@@ -35,7 +35,7 @@ export function useKnowledgeSearch(service: SearchService) {
     try {
       const response = await service.search({ query, top_k: 3 })
       if (!isSearchResponse(response)) {
-        throw new Error("搜索结果格式不正确")
+        throw new Error("检索结果格式不正确")
       }
       state.value =
         response.results.length > 0
