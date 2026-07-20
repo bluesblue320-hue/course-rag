@@ -108,3 +108,16 @@ def test_search_rejects_invalid_request_bodies(
     response = client.post("/search", json=payload)
 
     assert response.status_code == 422
+
+
+@pytest.mark.parametrize("top_k", ["2", 2.0], ids=["string", "float"])
+def test_search_rejects_non_integer_top_k(
+    client: TestClient,
+    top_k: object,
+) -> None:
+    response = client.post(
+        "/search",
+        json={"query": "valid", "top_k": top_k},
+    )
+
+    assert response.status_code == 422

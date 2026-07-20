@@ -47,7 +47,7 @@ class SearchRequest(BaseModel):
     """Describe one validated semantic retrieval request."""
 
     query: str
-    top_k: int = Field(default=3, gt=0)
+    top_k: int = Field(default=3, gt=0, strict=True)
 
     @field_validator("query")
     @classmethod
