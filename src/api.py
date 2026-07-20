@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from src.chunker import split_text
 from src.embedding import EmbeddingService
@@ -44,10 +44,19 @@ class HealthResponse(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    """Describe one semantic retrieval request."""
+    """Describe one validated semantic retrieval request."""
 
     query: str
-    top_k: int = 3
+    top_k: int = Field(default=3, gt=0)
+
+    @field_validator("query")
+    @classmethod
+    def clean_query(cls, value: str) -> str:
+        """Trim the query and reject blank text."""
+        cleaned_query = value.strip()
+        if not cleaned_query:
+            raise ValueError("query 不能为空")
+        return cleaned_query
 
 
 class SearchResultResponse(BaseModel):
@@ -84,15 +93,14 @@ def health(request: Request) -> HealthResponse:
 @app.post("/search", response_model=SearchResponse)
 def search(payload: SearchRequest, request: Request) -> SearchResponse:
     """Encode one query and return its most relevant source chunks."""
-    cleaned_query = payload.query.strip()
     query_embedding = request.app.state.embedding_service.encode_query(
-        cleaned_query
+        payload.query
     )
     results = request.app.state.retriever.search(
         query_embedding,
         top_k=payload.top_k,
     )
     return SearchResponse(
-        query=cleaned_query,
+        query=payload.query,
         results=[SearchResultResponse(**result) for result in results],
     )

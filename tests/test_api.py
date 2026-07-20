@@ -89,3 +89,22 @@ def test_search_honors_custom_top_k(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert len(response.json()["results"]) == 1
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"query": ""},
+        {"query": "   "},
+        {"query": "valid", "top_k": 0},
+        {"query": "valid", "top_k": -1},
+    ],
+)
+def test_search_rejects_invalid_request_bodies(
+    client: TestClient,
+    payload: dict[str, object],
+) -> None:
+    response = client.post("/search", json=payload)
+
+    assert response.status_code == 422
