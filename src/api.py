@@ -43,6 +43,29 @@ class HealthResponse(BaseModel):
     chunk_count: int
 
 
+class SearchRequest(BaseModel):
+    """Describe one semantic retrieval request."""
+
+    query: str
+    top_k: int = 3
+
+
+class SearchResultResponse(BaseModel):
+    """Describe one ranked source chunk."""
+
+    rank: int
+    score: float
+    text: str
+    chunk_index: int
+
+
+class SearchResponse(BaseModel):
+    """Return the cleaned query and ranked source chunks."""
+
+    query: str
+    results: list[SearchResultResponse]
+
+
 app = FastAPI(
     title="Course RAG Retrieval API",
     lifespan=lifespan,
@@ -55,4 +78,21 @@ def health(request: Request) -> HealthResponse:
     return HealthResponse(
         status="ok",
         chunk_count=request.app.state.chunk_count,
+    )
+
+
+@app.post("/search", response_model=SearchResponse)
+def search(payload: SearchRequest, request: Request) -> SearchResponse:
+    """Encode one query and return its most relevant source chunks."""
+    cleaned_query = payload.query.strip()
+    query_embedding = request.app.state.embedding_service.encode_query(
+        cleaned_query
+    )
+    results = request.app.state.retriever.search(
+        query_embedding,
+        top_k=payload.top_k,
+    )
+    return SearchResponse(
+        query=cleaned_query,
+        results=[SearchResultResponse(**result) for result in results],
     )
