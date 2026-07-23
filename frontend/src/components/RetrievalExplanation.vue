@@ -1,3 +1,5 @@
+<script setup lang="ts"></script>
+
 <template>
   <section class="panel" aria-labelledby="explanation-heading">
     <h2 id="explanation-heading">这一步发生了什么？</h2>

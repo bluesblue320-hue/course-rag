@@ -1,3 +1,5 @@
+<script setup lang="ts"></script>
+
 <template>
   <aside class="sidebar">
     <div class="brand">

@@ -5,6 +5,15 @@ import type { SearchState } from "../types/search"
 import SearchStatus from "./SearchStatus.vue"
 
 describe("SearchStatus", () => {
+  it("renders no status panel while idle", () => {
+    const state: SearchState = { status: "idle" }
+    const wrapper = mount(SearchStatus, { props: { state } })
+
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.find("div").exists()).toBe(false)
+  })
+
   it("announces loading", () => {
     const state: SearchState = { status: "loading", query: "业务逻辑" }
     const wrapper = mount(SearchStatus, { props: { state } })
