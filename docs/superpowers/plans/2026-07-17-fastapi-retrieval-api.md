@@ -20,7 +20,7 @@
 
 ---
 
-### 任务 1：FastAPI 应用启动与健康检查接口
+### Task 1：FastAPI 应用启动与健康检查接口
 
 **文件：**
 - 修改：`requirements.txt:1-3`
@@ -207,7 +207,7 @@ git commit --only -m "feat: initialize FastAPI retrieval service" -- requirement
 
 ---
 
-### 任务 2：成功检索与类型化响应
+### Task 2：成功检索与类型化响应
 
 **文件：**
 - 修改：`tests/test_api.py`
@@ -454,7 +454,7 @@ git commit --only -m "feat: add semantic search endpoint" -- src/api.py tests/te
 
 ---
 
-### 任务 3：请求参数校验
+### Task 3：请求参数校验
 
 **文件：**
 - 修改：`tests/test_api.py`
@@ -580,7 +580,7 @@ git commit --only -m "feat: validate retrieval requests" -- src/api.py tests/tes
 
 ---
 
-### 任务 4：API 文档与最终验证
+### Task 4：API 文档与最终验证
 
 **文件：**
 - 修改：`README.md:3-76`
