@@ -45,7 +45,7 @@ defineProps<{
         :result="result"
       />
     </template>
-    <p v-else class="empty-message" role="status">未找到相关结果，请尝试调整查询内容。</p>
+    <p v-else class="empty-message">未找到相关结果，请尝试调整查询内容。</p>
   </section>
 </template>
 

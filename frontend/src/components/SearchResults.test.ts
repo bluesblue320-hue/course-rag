@@ -79,6 +79,22 @@ describe("SearchResults", () => {
     expect(wrapper.text()).toContain("未找到相关结果")
   })
 
+  it("keeps empty-result guidance out of a live region", () => {
+    const wrapper = mount(SearchResults, {
+      props: {
+        state: {
+          status: "empty",
+          response: {
+            ...successState.response,
+            results: [],
+          },
+        },
+      },
+    })
+
+    expect(wrapper.find(".empty-message").attributes("role")).toBeUndefined()
+  })
+
   it("renders no result region for idle state", () => {
     const wrapper = mount(SearchResults, {
       props: { state: { status: "idle" } },

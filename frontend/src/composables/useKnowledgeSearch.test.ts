@@ -104,6 +104,14 @@ describe("useKnowledgeSearch", () => {
     await search.retry()
 
     expect(searchMethod).toHaveBeenCalledTimes(2)
+    expect(searchMethod).toHaveBeenNthCalledWith(1, {
+      query: "业务逻辑",
+      top_k: 3,
+    })
+    expect(searchMethod).toHaveBeenNthCalledWith(2, {
+      query: "业务逻辑",
+      top_k: 3,
+    })
     expect(search.state.value.status).toBe("success")
   })
 })
