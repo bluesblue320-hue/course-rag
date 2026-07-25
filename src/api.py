@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field, field_validator
@@ -27,6 +28,7 @@ def initialize_search(app: FastAPI) -> None:
     app.state.embedding_service = embedding_service
     app.state.retriever = retriever
     app.state.chunk_count = len(chunks)
+    app.state.model_name = embedding_service.model_name
 
 
 @asynccontextmanager
@@ -72,6 +74,9 @@ class SearchResponse(BaseModel):
     """Return the cleaned query and ranked source chunks."""
 
     query: str
+    elapsed_ms: float
+    indexed_chunks: int
+    model: str
     results: list[SearchResultResponse]
 
 
@@ -93,6 +98,7 @@ def health(request: Request) -> HealthResponse:
 @app.post("/search", response_model=SearchResponse)
 def search(payload: SearchRequest, request: Request) -> SearchResponse:
     """Encode one query and return its most relevant source chunks."""
+    started_at = perf_counter()
     query_embedding = request.app.state.embedding_service.encode_query(
         payload.query
     )
@@ -100,7 +106,11 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
         query_embedding,
         top_k=payload.top_k,
     )
+    elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
     return SearchResponse(
         query=payload.query,
+        elapsed_ms=elapsed_ms,
+        indexed_chunks=request.app.state.chunk_count,
+        model=request.app.state.model_name,
         results=[SearchResultResponse(**result) for result in results],
     )

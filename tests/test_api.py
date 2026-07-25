@@ -15,6 +15,7 @@ class FakeEmbeddingService:
 
     def __init__(self) -> None:
         type(self).init_count += 1
+        self.model_name = "fake/test-model"
 
     def encode_documents(self, texts: list[str]) -> np.ndarray:
         type(self).document_encode_count += 1
@@ -62,7 +63,11 @@ def test_app_builds_index_once_and_health_reports_chunk_count(
 
 def test_search_uses_default_top_k_and_returns_typed_results(
     client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    times = iter([10.0, 10.125])
+    monkeypatch.setattr(api_module, "perf_counter", lambda: next(times))
+
     response = client.post(
         "/search",
         json={"query": "  业务逻辑应该写在哪里？  "},
@@ -71,6 +76,9 @@ def test_search_uses_default_top_k_and_returns_typed_results(
     assert response.status_code == 200
     body = response.json()
     assert body["query"] == "业务逻辑应该写在哪里？"
+    assert body["elapsed_ms"] == 125.0
+    assert body["indexed_chunks"] == 4
+    assert body["model"] == "fake/test-model"
     assert len(body["results"]) == 3
     assert body["results"][0] == {
         "rank": 1,

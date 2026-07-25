@@ -56,6 +56,7 @@ def test_embedding_service_loads_model_once_and_batches_documents(
     result = service.encode_documents(["第一段", "第二段"])
 
     assert len(created_models) == 1
+    assert service.model_name == "example/model"
     assert created_models[0].model_name == "example/model"
     assert created_models[0].calls == [
         {

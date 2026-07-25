@@ -13,10 +13,13 @@
 - 使用 pytest 离线测试核心逻辑
 - 通过 FastAPI 提供健康检查和 Top-K 检索接口
 - 在服务启动时构建一次索引，并在请求之间复用
+- 通过 Vue 3 页面提交问题并展示真实检索结果
+- 通过 Vite `/api` 代理连接浏览器与 FastAPI
+- 返回检索耗时、模型名和已索引 Chunk 数量
 
 ## 当前没有实现
 
-本阶段没有调用大语言模型生成答案，也没有数据库、向量数据库、LangChain、LangGraph、Agent 或前端。命令行和 Web API 都只负责返回检索原文。
+本阶段没有调用大语言模型生成答案，也没有数据库、向量数据库、LangChain、LangGraph 或 Agent。命令行、Web API 和 Vue 前端都只负责检索并展示相关原文。
 
 ## 项目目录
 
@@ -31,6 +34,9 @@ course-rag/
 │   ├── retriever.py          # 计算相似度并排序
 │   └── main.py               # 命令行入口
 ├── tests/                    # 离线单元测试
+├── frontend/                 # Vue 3 + Vite + TypeScript 前端
+│   ├── src/services/         # 真实 HTTP 服务与可选模拟服务
+│   └── README.md             # 前端运行与学习说明
 ├── requirements.txt          # Python 依赖
 └── README.md                 # 学习说明
 ```
@@ -94,7 +100,32 @@ curl.exe -X POST http://127.0.0.1:8000/search `
   -d '{"query":"业务逻辑应该写在哪里？","top_k":3}'
 ```
 
-`query` 不能为空，`top_k` 默认是 `3` 且必须大于 `0`。接口返回按相似度降序排列的原文、分数、排名和 Chunk 编号。
+`query` 不能为空，`top_k` 默认是 `3` 且必须大于 `0`。接口返回清理后的问题、检索耗时、模型名、已索引 Chunk 数量，以及按相似度降序排列的原文、分数、排名和 Chunk 编号。
+
+## 启动完整 Web 应用
+
+先在项目根目录启动 FastAPI：
+
+```powershell
+uvicorn src.api:app --reload
+```
+
+再打开另一个 PowerShell，进入 `frontend/` 并启动 Vite：
+
+```powershell
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+浏览器打开 `http://127.0.0.1:5173`。前端默认请求 `/api/search`，Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`，因此开发环境不需要额外配置 CORS。
+
+如果只想演示界面、不启动 Python 后端，可以在启动 Vite 前设置：
+
+```powershell
+$env:VITE_USE_MOCK_SEARCH="true"
+npm.cmd run dev
+```
 
 ## 运行测试
 
@@ -103,6 +134,14 @@ pytest -v
 ```
 
 测试通过假模型和手工 NumPy 向量验证逻辑，不会下载真实模型。
+
+前端验证在 `frontend/` 中执行：
+
+```powershell
+npm.cmd run test
+npm.cmd run type-check
+npm.cmd run build
+```
 
 ## 示例问题
 
@@ -121,11 +160,13 @@ knowledge.txt
     ↓ Embedding
 文档向量矩阵
 
-用户问题 → 问题向量
-              ↓
-文档向量与问题向量计算余弦相似度
-              ↓
-按分数降序排列并返回 Top K 原文
+浏览器 → Vue → Vite /api 代理 → FastAPI
+                                ↓
+用户问题                      问题向量
+                                ↓
+                  文档向量与问题向量计算余弦相似度
+                                ↓
+                  按分数降序返回 Top K 原文
 ```
 
 完整 RAG 还会把 Top K 原文和问题一起交给大语言模型。本项目故意停在检索结果处，便于先理解基础数据流。
@@ -172,4 +213,4 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 ## 下一阶段
 
-理解当前项目后，可以增加一个生成模块：把用户问题和检索出的 Top K 原文组装成提示词，再交给大语言模型生成有依据的回答。检索器、Chunk 和 Embedding 逻辑仍可复用。加入生成前，应先理解为什么检索结果会影响答案质量。
+当前浏览器到真实检索器的链路已经打通。下一阶段可以增加一个生成模块：把用户问题和检索出的 Top K 原文组装成提示词，再交给大语言模型生成有依据的回答。检索器、Chunk、Embedding、FastAPI 和前端状态机仍可复用。
