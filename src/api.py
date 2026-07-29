@@ -6,11 +6,16 @@ from pathlib import Path
 from time import perf_counter
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from src.chunker import split_text
 from src.embedding import EmbeddingService
+from src.exceptions import GenerationConfigurationError, GenerationError
+from src.generation import GenerationService
 from src.loader import load_text
+from src.prompt_builder import PromptBuilder
+from src.rag_service import RagService
 from src.retriever import SemanticRetriever
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,11 +29,21 @@ def initialize_search(app: FastAPI) -> None:
     embedding_service = EmbeddingService()
     document_embeddings = embedding_service.encode_documents(chunks)
     retriever = SemanticRetriever(chunks, document_embeddings)
+    prompt_builder = PromptBuilder()
+    generation_service = GenerationService()
+    rag_service = RagService(
+        embedding_service=embedding_service,
+        retriever=retriever,
+        prompt_builder=prompt_builder,
+        generation_service=generation_service,
+    )
 
     app.state.embedding_service = embedding_service
     app.state.retriever = retriever
+    app.state.rag_service = rag_service
     app.state.chunk_count = len(chunks)
     app.state.model_name = embedding_service.model_name
+    app.state.llm_model_name = generation_service.model_name
 
 
 @asynccontextmanager
@@ -80,10 +95,80 @@ class SearchResponse(BaseModel):
     results: list[SearchResultResponse]
 
 
+class AskRequest(BaseModel):
+    """Describe one validated retrieval-augmented question."""
+
+    question: str = Field(min_length=1, max_length=500)
+    top_k: int = Field(default=3, ge=1, le=10, strict=True)
+
+    @field_validator("question", mode="before")
+    @classmethod
+    def clean_question(cls, value: object) -> object:
+        """Trim the question and reject blank text."""
+        if not isinstance(value, str):
+            return value
+        cleaned_question = value.strip()
+        if not cleaned_question:
+            raise ValueError("question 不能为空")
+        return cleaned_question
+
+
+class AskSourceResponse(BaseModel):
+    """Describe one source used to ground an answer."""
+
+    rank: int
+    score: float
+    text: str
+    chunk_index: int
+
+
+class AskResponse(BaseModel):
+    """Return one generated answer, its sources, models, and timings."""
+
+    question: str
+    answer: str
+    retrieval_elapsed_ms: float
+    generation_elapsed_ms: float
+    total_elapsed_ms: float
+    embedding_model: str
+    llm_model: str
+    sources: list[AskSourceResponse]
+
+
 app = FastAPI(
     title="Course RAG Retrieval API",
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(GenerationError)
+async def handle_generation_error(
+    _request: Request,
+    _error: GenerationError,
+) -> JSONResponse:
+    """Hide provider errors behind a stable public response."""
+    return JSONResponse(
+        status_code=502,
+        content={
+            "code": "GENERATION_FAILED",
+            "message": "回答生成失败，请稍后重试",
+        },
+    )
+
+
+@app.exception_handler(GenerationConfigurationError)
+async def handle_generation_configuration_error(
+    _request: Request,
+    _error: GenerationConfigurationError,
+) -> JSONResponse:
+    """Report unavailable LLM configuration without exposing secrets."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "LLM_NOT_CONFIGURED",
+            "message": "问答服务尚未完成配置",
+        },
+    )
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -113,4 +198,20 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
         indexed_chunks=request.app.state.chunk_count,
         model=request.app.state.model_name,
         results=[SearchResultResponse(**result) for result in results],
+    )
+
+
+@app.post("/ask", response_model=AskResponse)
+def ask(payload: AskRequest, request: Request) -> AskResponse:
+    """Delegate one validated question to the initialized RAG pipeline."""
+    result = request.app.state.rag_service.answer(
+        payload.question,
+        top_k=payload.top_k,
+    )
+    return AskResponse.model_validate(
+        {
+            **result,
+            "embedding_model": request.app.state.model_name,
+            "llm_model": request.app.state.llm_model_name,
+        }
     )

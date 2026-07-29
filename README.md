@@ -1,6 +1,6 @@
-# 最小语义检索项目
+# 课程 RAG 问答项目
 
-这是一个面向初学者的最小 RAG 检索项目。它读取本地中文资料，把资料切分成 Chunk，使用 Embedding 模型把文本转换为向量，再通过余弦相似度找出与用户问题最相关的三个 Chunk。
+这是一个面向初学者的最小 RAG 项目。它读取本地中文资料，把资料切分成 Chunk，使用 Embedding 模型和余弦相似度检索相关原文，并通过 OpenAI-compatible Chat Completions API 生成有来源标注的回答。
 
 ## 当前实现
 
@@ -13,13 +13,17 @@
 - 使用 pytest 离线测试核心逻辑
 - 通过 FastAPI 提供健康检查和 Top-K 检索接口
 - 在服务启动时构建一次索引，并在请求之间复用
+- 使用 PromptBuilder 组装回答规则、检索来源和用户问题
+- 使用 GenerationService 调用可配置的 OpenAI-compatible LLM
+- 使用 RagService 编排 Embedding、检索、Prompt 和答案生成
+- 通过 FastAPI `/ask` 返回答案、来源、模型名和各阶段耗时
 - 通过 Vue 3 页面提交问题并展示真实检索结果
 - 通过 Vite `/api` 代理连接浏览器与 FastAPI
 - 返回检索耗时、模型名和已索引 Chunk 数量
 
 ## 当前没有实现
 
-本阶段没有调用大语言模型生成答案，也没有数据库、向量数据库、LangChain、LangGraph 或 Agent。命令行、Web API 和 Vue 前端都只负责检索并展示相关原文。
+后端已经完成从语义检索到 LLM 回答生成的 RAG 闭环，但 Vue 前端暂时仍只调用 `/search` 并展示原始检索结果，尚未提供问答页面。本项目仍未支持 PDF、数据库、向量数据库、LangChain、LangGraph 或 Agent。
 
 ## 项目目录
 
@@ -32,6 +36,10 @@ course-rag/
 │   ├── chunker.py            # 切分文本
 │   ├── embedding.py          # 生成向量
 │   ├── retriever.py          # 计算相似度并排序
+│   ├── prompt_builder.py      # 组装课程问答 Prompt
+│   ├── generation.py         # 调用 OpenAI-compatible LLM
+│   ├── rag_service.py        # 编排完整 RAG 调用链
+│   ├── exceptions.py         # RAG 领域异常
 │   └── main.py               # 命令行入口
 ├── tests/                    # 离线单元测试
 ├── frontend/                 # Vue 3 + Vite + TypeScript 前端
@@ -65,6 +73,26 @@ python -m pip install -r requirements.txt
 ```
 
 第一次实际运行会从 Hugging Face 下载默认模型，需要网络连接和一定磁盘空间。后续运行通常会使用本地缓存。
+
+## 配置 LLM
+
+复制根目录的 `.env.example` 为本地 `.env`，并填写实际配置。`.env` 包含密钥，不应提交到 Git；`.env.example` 只提供不含真实密钥的字段模板。
+
+```env
+LLM_API_KEY=
+LLM_BASE_URL=
+LLM_MODEL=
+LLM_TIMEOUT_SECONDS=30
+```
+
+GenerationService 从进程环境变量读取配置。`LLM_API_KEY` 和 `LLM_MODEL` 必填；`LLM_BASE_URL` 默认是 `https://api.openai.com/v1`，`LLM_TIMEOUT_SECONDS` 默认是 `30` 且必须大于 `0`。例如在当前 PowerShell 会话中设置：
+
+```powershell
+$env:LLM_API_KEY="your-local-api-key"
+$env:LLM_BASE_URL="https://api.openai.com/v1"
+$env:LLM_MODEL="your-model-name"
+$env:LLM_TIMEOUT_SECONDS="30"
+```
 
 ## 运行程序
 
@@ -102,6 +130,18 @@ curl.exe -X POST http://127.0.0.1:8000/search `
 
 `query` 不能为空，`top_k` 默认是 `3` 且必须大于 `0`。接口返回清理后的问题、检索耗时、模型名、已索引 Chunk 数量，以及按相似度降序排列的原文、分数、排名和 Chunk 编号。
 
+问答请求：
+
+```powershell
+curl.exe -X POST http://127.0.0.1:8000/ask `
+  -H "Content-Type: application/json" `
+  -d '{"question":"Service 层负责什么？","top_k":3}'
+```
+
+`question` 清理后长度必须为 1 到 500，`top_k` 默认是 `3` 且范围为 1 到 10。`/ask` 返回生成答案、Top-K 来源、Embedding 与 LLM 模型名，以及检索、生成和总耗时。LLM 调用失败返回统一的 `502` 响应，配置缺失返回统一的 `503` 响应，不会向客户端暴露上游完整错误。
+
+`/search` 始终只返回原始检索结果；`/ask` 才会执行 Prompt 构造和 LLM 回答生成。
+
 ## 启动完整 Web 应用
 
 先在项目根目录启动 FastAPI：
@@ -118,7 +158,7 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-浏览器打开 `http://127.0.0.1:5173`。前端默认请求 `/api/search`，Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`，因此开发环境不需要额外配置 CORS。
+浏览器打开 `http://127.0.0.1:5173`。前端目前只请求 `/api/search`，不会调用 `/ask`。Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`，因此开发环境不需要额外配置 CORS。
 
 如果只想演示界面、不启动 Python 后端，可以在启动 Vite 前设置：
 
@@ -160,16 +200,16 @@ knowledge.txt
     ↓ Embedding
 文档向量矩阵
 
-浏览器 → Vue → Vite /api 代理 → FastAPI
-                                ↓
-用户问题                      问题向量
-                                ↓
-                  文档向量与问题向量计算余弦相似度
-                                ↓
-                  按分数降序返回 Top K 原文
+用户问题
+    ↓ Embedding
+问题向量
+    ↓ 与文档向量计算余弦相似度
+Top K 原文
+    ├── `/search`：直接返回检索结果
+    └── `/ask`：PromptBuilder → GenerationService → 答案和来源
 ```
 
-完整 RAG 还会把 Top K 原文和问题一起交给大语言模型。本项目故意停在检索结果处，便于先理解基础数据流。
+Vue 前端当前使用 `/search` 分支；完整的后端 RAG 闭环可以通过 `/ask` 单独调用。
 
 ## 四个核心概念
 
@@ -213,4 +253,4 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 ## 下一阶段
 
-当前浏览器到真实检索器的链路已经打通。下一阶段可以增加一个生成模块：把用户问题和检索出的 Top K 原文组装成提示词，再交给大语言模型生成有依据的回答。检索器、Chunk、Embedding、FastAPI 和前端状态机仍可复用。
+后端问答链路已经打通。后续可以让 Vue 前端调用 `/ask` 并展示答案与来源；该问答页面以及 PDF、数据库和向量数据库支持目前都尚未实现。
