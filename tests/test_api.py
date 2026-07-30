@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+import os
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +31,7 @@ class FakeEmbeddingService:
 
 class FakeGenerationService:
     init_count = 0
+    close_count = 0
     prompts: list[str] = []
 
     def __init__(self) -> None:
@@ -39,6 +41,27 @@ class FakeGenerationService:
     def generate(self, prompt: str) -> str:
         type(self).prompts.append(prompt)
         return "Service 层负责处理核心业务逻辑。[来源1]"
+
+    def close(self) -> None:
+        type(self).close_count += 1
+
+
+class MisconfiguredGenerationService:
+    init_count = 0
+    generate_count = 0
+
+    def __init__(self) -> None:
+        type(self).init_count += 1
+        raise GenerationConfigurationError("缺少 LLM API Key 配置")
+
+    def generate(self, _prompt: str) -> str:
+        type(self).generate_count += 1
+        return "不应生成答案"
+
+
+class UnexpectedlyFailingGenerationService:
+    def __init__(self) -> None:
+        raise RuntimeError("unexpected generation bug")
 
 
 class FailingGenerationService:
@@ -58,6 +81,7 @@ def client(
     FakeEmbeddingService.document_encode_count = 0
     FakeEmbeddingService.queries = []
     FakeGenerationService.init_count = 0
+    FakeGenerationService.close_count = 0
     FakeGenerationService.prompts = []
 
     knowledge_file = tmp_path / "knowledge.txt"
@@ -73,6 +97,11 @@ def client(
         "GenerationService",
         FakeGenerationService,
     )
+    monkeypatch.setattr(
+        api_module,
+        "load_dotenv",
+        lambda *, dotenv_path, override: None,
+    )
 
     with TestClient(api_module.app) as test_client:
         yield test_client
@@ -85,11 +114,187 @@ def test_app_builds_index_once_and_health_reports_chunk_count(
     second_response = client.get("/health")
 
     assert first_response.status_code == 200
-    assert first_response.json() == {"status": "ok", "chunk_count": 4}
+    assert first_response.json() == {
+        "status": "ok",
+        "chunk_count": 4,
+        "retrieval_ready": True,
+        "generation_ready": True,
+    }
     assert second_response.status_code == 200
     assert FakeEmbeddingService.init_count == 1
     assert FakeEmbeddingService.document_encode_count == 1
     assert FakeGenerationService.init_count == 1
+
+
+def test_app_starts_without_llm_and_keeps_retrieval_available(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeEmbeddingService.init_count = 0
+    FakeEmbeddingService.document_encode_count = 0
+    FakeEmbeddingService.queries = []
+    MisconfiguredGenerationService.init_count = 0
+    MisconfiguredGenerationService.generate_count = 0
+
+    knowledge_file = tmp_path / "knowledge.txt"
+    knowledge_file.write_text("A" * 900, encoding="utf-8")
+    monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(
+        api_module,
+        "EmbeddingService",
+        FakeEmbeddingService,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "GenerationService",
+        MisconfiguredGenerationService,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "load_dotenv",
+        lambda *, dotenv_path, override: None,
+    )
+
+    with TestClient(api_module.app) as test_client:
+        health_response = test_client.get("/health")
+        search_response = test_client.post(
+            "/search",
+            json={"query": "课程问题"},
+        )
+        ask_response = test_client.post(
+            "/ask",
+            json={"question": "课程问题"},
+        )
+
+    assert health_response.status_code == 200
+    assert health_response.json() == {
+        "status": "ok",
+        "chunk_count": 4,
+        "retrieval_ready": True,
+        "generation_ready": False,
+    }
+    assert search_response.status_code == 200
+    assert ask_response.status_code == 503
+    assert ask_response.json() == {
+        "code": "LLM_NOT_CONFIGURED",
+        "message": "问答服务尚未完成配置",
+    }
+    assert "缺少 LLM API Key 配置" not in ask_response.text
+    assert FakeEmbeddingService.init_count == 1
+    assert FakeEmbeddingService.document_encode_count == 1
+    assert MisconfiguredGenerationService.init_count == 1
+    assert MisconfiguredGenerationService.generate_count == 0
+
+
+def test_loads_project_dotenv_before_generation_without_overriding_process_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    dotenv_calls: list[tuple[Path, bool]] = []
+
+    class EnvironmentRecordingGenerationService:
+        observed_api_key = ""
+
+        def __init__(self) -> None:
+            events.append("generation")
+            type(self).observed_api_key = os.environ["LLM_API_KEY"]
+            self.model_name = "fake/llm-model"
+
+        def close(self) -> None:
+            return None
+
+    def fake_load_dotenv(*, dotenv_path: Path, override: bool) -> bool:
+        events.append("dotenv")
+        dotenv_calls.append((dotenv_path, override))
+        if override or "LLM_API_KEY" not in os.environ:
+            os.environ["LLM_API_KEY"] = "dotenv-key"
+        return True
+
+    knowledge_file = tmp_path / "knowledge.txt"
+    knowledge_file.write_text("A" * 900, encoding="utf-8")
+    monkeypatch.setenv("LLM_API_KEY", "process-key")
+    monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(
+        api_module,
+        "EmbeddingService",
+        FakeEmbeddingService,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "GenerationService",
+        EnvironmentRecordingGenerationService,
+    )
+    monkeypatch.setattr(api_module, "load_dotenv", fake_load_dotenv)
+
+    with TestClient(api_module.app) as test_client:
+        response = test_client.get("/health")
+
+    assert response.status_code == 200
+    assert events == ["dotenv", "generation"]
+    assert dotenv_calls == [(api_module.PROJECT_ROOT / ".env", False)]
+    assert EnvironmentRecordingGenerationService.observed_api_key == (
+        "process-key"
+    )
+
+
+def test_unexpected_generation_initialization_error_still_fails_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    knowledge_file = tmp_path / "knowledge.txt"
+    knowledge_file.write_text("A" * 900, encoding="utf-8")
+    monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(
+        api_module,
+        "EmbeddingService",
+        FakeEmbeddingService,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "GenerationService",
+        UnexpectedlyFailingGenerationService,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "load_dotenv",
+        lambda *, dotenv_path, override: None,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected generation bug"):
+        with TestClient(api_module.app):
+            pass
+
+
+def test_lifespan_closes_configured_generation_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    FakeGenerationService.close_count = 0
+    knowledge_file = tmp_path / "knowledge.txt"
+    knowledge_file.write_text("A" * 900, encoding="utf-8")
+    monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(
+        api_module,
+        "EmbeddingService",
+        FakeEmbeddingService,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "GenerationService",
+        FakeGenerationService,
+    )
+    monkeypatch.setattr(
+        api_module,
+        "load_dotenv",
+        lambda *, dotenv_path, override: None,
+    )
+
+    with TestClient(api_module.app) as test_client:
+        assert test_client.get("/health").status_code == 200
+        assert FakeGenerationService.close_count == 0
+
+    assert FakeGenerationService.close_count == 1
 
 
 def test_search_uses_default_top_k_and_returns_typed_results(

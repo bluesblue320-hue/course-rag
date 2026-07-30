@@ -36,7 +36,9 @@ class GenerationService:
         self.base_url = (resolved_base_url or DEFAULT_BASE_URL).rstrip("/")
         self.model_name = resolved_model_name
         self.timeout_seconds = self._resolve_timeout(timeout_seconds)
+        self._owns_client = client is None
         self._client = client if client is not None else httpx.Client()
+        self._closed = False
 
     @staticmethod
     def _resolve_text(explicit_value: str | None, environment_name: str) -> str:
@@ -85,11 +87,33 @@ class GenerationService:
                 timeout=self.timeout_seconds,
             )
             response.raise_for_status()
-            content = response.json()["choices"][0]["message"]["content"]
-        except Exception as exc:
+        except httpx.TimeoutException as exc:
+            raise GenerationError("LLM 请求超时") from exc
+        except httpx.HTTPError as exc:
             raise GenerationError("LLM 服务调用失败") from exc
 
-        answer = content.strip() if isinstance(content, str) else ""
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise GenerationError("LLM 返回格式无效") from exc
+
+        if not isinstance(content, str):
+            raise GenerationError("LLM 返回格式无效")
+
+        answer = content.strip()
         if not answer:
             raise GenerationError("LLM 服务返回了空答案")
         return answer
+
+    def close(self) -> None:
+        """Close the internally owned HTTP client at most once."""
+        if self._closed:
+            return
+
+        self._closed = True
+        if not self._owns_client:
+            return
+
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()

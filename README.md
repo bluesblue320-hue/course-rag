@@ -76,7 +76,13 @@ python -m pip install -r requirements.txt
 
 ## 配置 LLM
 
-复制根目录的 `.env.example` 为本地 `.env`，并填写实际配置。`.env` 包含密钥，不应提交到 Git；`.env.example` 只提供不含真实密钥的字段模板。
+在项目根目录复制 `.env.example` 为本地 `.env`：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+然后填写实际配置：
 
 ```env
 LLM_API_KEY=
@@ -85,7 +91,9 @@ LLM_MODEL=
 LLM_TIMEOUT_SECONDS=30
 ```
 
-GenerationService 从进程环境变量读取配置。`LLM_API_KEY` 和 `LLM_MODEL` 必填；`LLM_BASE_URL` 默认是 `https://api.openai.com/v1`，`LLM_TIMEOUT_SECONDS` 默认是 `30` 且必须大于 `0`。例如在当前 PowerShell 会话中设置：
+FastAPI 启动时会通过 `python-dotenv` 自动读取项目根目录的 `.env`，且不会覆盖已有的进程环境变量。`LLM_API_KEY` 和 `LLM_MODEL` 必填；`LLM_BASE_URL` 默认是 `https://api.openai.com/v1`，`LLM_TIMEOUT_SECONDS` 默认是 `30` 且必须大于 `0`。`.env` 包含密钥，绝不能提交到 Git；`.env.example` 只能保留不含真实值的字段模板。
+
+也可以在当前 PowerShell 会话中设置进程环境变量；这些值优先于 `.env`：
 
 ```powershell
 $env:LLM_API_KEY="your-local-api-key"
@@ -120,6 +128,19 @@ uvicorn src.api:app --reload
 curl.exe http://127.0.0.1:8000/health
 ```
 
+响应会分别报告检索和生成能力是否就绪。例如只配置好检索、尚未配置 LLM 时：
+
+```json
+{
+  "status": "ok",
+  "chunk_count": 8,
+  "retrieval_ready": true,
+  "generation_ready": false
+}
+```
+
+检索索引成功初始化后，`status` 保持为 `"ok"`；`generation_ready` 仅在完整的问答服务可用时为 `true`。
+
 检索请求：
 
 ```powershell
@@ -141,6 +162,18 @@ curl.exe -X POST http://127.0.0.1:8000/ask `
 `question` 清理后长度必须为 1 到 500，`top_k` 默认是 `3` 且范围为 1 到 10。`/ask` 返回生成答案、Top-K 来源、Embedding 与 LLM 模型名，以及检索、生成和总耗时。LLM 调用失败返回统一的 `502` 响应，配置缺失返回统一的 `503` 响应，不会向客户端暴露上游完整错误。
 
 `/search` 始终只返回原始检索结果；`/ask` 才会执行 Prompt 构造和 LLM 回答生成。
+
+### 缺少 LLM 配置时
+
+LLM 未配置不会阻止 FastAPI 启动。只要检索依赖初始化成功，接口行为如下：
+
+```text
+GET  /health   → 200，generation_ready 为 false
+POST /search   → 200，正常语义检索
+POST /ask      → 503 LLM_NOT_CONFIGURED
+```
+
+配置完整时，`/health` 的 `generation_ready` 为 `true`，`/search` 仍执行原有语义检索，`/ask` 正常生成回答。
 
 ## 启动完整 Web 应用
 
@@ -170,7 +203,7 @@ npm.cmd run dev
 ## 运行测试
 
 ```powershell
-pytest -v
+python -m pytest -v
 ```
 
 测试通过假模型和手工 NumPy 向量验证逻辑，不会下载真实模型。
