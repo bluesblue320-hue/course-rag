@@ -111,7 +111,10 @@ async function submitQuestion(question: string): Promise<void> {
         <AskStatus :state="askState" @retry="retryAsk" />
         <template v-if="askState.status === 'success'">
           <AnswerCard :response="askState.response" />
-          <AnswerSources :sources="askState.response.sources" />
+          <AnswerSources
+            :sources="askState.response.sources"
+            :answer-status="askState.response.answer_status"
+          />
         </template>
       </template>
       <template v-else>

@@ -4,8 +4,13 @@ from typing import Any
 import pytest
 
 import src.rag_service as rag_service_module
-from src.exceptions import GenerationError
-from src.rag_service import RagService
+from src.exceptions import GenerationError, RagConfigurationError
+from src.rag_service import (
+    DEFAULT_MIN_RELEVANCE_SCORE,
+    INSUFFICIENT_CONTEXT_ANSWER,
+    RagService,
+    resolve_min_relevance_score,
+)
 
 
 class FakeEmbeddingService:
@@ -67,6 +72,7 @@ class FakeGenerationService:
 def make_pipeline(
     sources: list[dict[str, object]] | None = None,
     generation_error: Exception | None = None,
+    min_relevance_score: float = DEFAULT_MIN_RELEVANCE_SCORE,
 ) -> tuple[
     RagService,
     FakeEmbeddingService,
@@ -88,7 +94,13 @@ def make_pipeline(
     retriever = FakeRetriever(calls, source_results)
     prompt_builder = FakePromptBuilder(calls)
     generation = FakeGenerationService(calls, generation_error)
-    service = RagService(embedding, retriever, prompt_builder, generation)
+    service = RagService(
+        embedding,
+        retriever,
+        prompt_builder,
+        generation,
+        min_relevance_score=min_relevance_score,
+    )
     return service, embedding, retriever, prompt_builder, generation, calls
 
 
@@ -104,6 +116,9 @@ def test_answer_returns_generated_answer_and_sources() -> None:
     result = service.answer("课程问题")
 
     assert result["answer"] == "generated answer"
+    assert result["answer_status"] == "answered"
+    assert result["max_relevance_score"] == 0.82
+    assert result["relevance_threshold"] == 0.35
     assert result["sources"][0]["text"] == "Service 层负责业务逻辑。"
 
 
@@ -207,10 +222,90 @@ def test_generation_error_is_propagated() -> None:
     assert caught.value is error
 
 
-def test_empty_sources_are_still_passed_to_prompt_builder() -> None:
-    service, _, _, prompt_builder, _, _ = make_pipeline(sources=[])
+def test_empty_sources_return_insufficient_context_without_generation() -> None:
+    service, _, _, prompt_builder, generation, calls = make_pipeline(sources=[])
 
     result = service.answer("课程问题")
 
-    assert prompt_builder.requests == [("课程问题", [])]
+    assert prompt_builder.requests == []
+    assert generation.prompts == []
+    assert calls == ["embedding", "retriever"]
+    assert result["answer"] == INSUFFICIENT_CONTEXT_ANSWER
+    assert result["answer_status"] == "insufficient_context"
     assert result["sources"] == []
+    assert result["max_relevance_score"] is None
+    assert result["generation_elapsed_ms"] == 0.0
+
+
+def test_score_equal_to_threshold_is_answered() -> None:
+    sources = [{"rank": 1, "score": 0.35, "text": "资料", "chunk_index": 0}]
+    service, _, _, prompt_builder, generation, _ = make_pipeline(sources)
+
+    result = service.answer("课程问题")
+
+    assert result["answer_status"] == "answered"
+    assert prompt_builder.requests
+    assert generation.prompts == ["built prompt"]
+
+
+def test_low_score_returns_candidates_without_prompt_or_generation() -> None:
+    sources = [{"rank": 1, "score": 0.34, "text": "候选资料", "chunk_index": 0}]
+    service, _, _, prompt_builder, generation, calls = make_pipeline(sources)
+
+    result = service.answer("课程问题")
+
+    assert result["answer_status"] == "insufficient_context"
+    assert result["answer"] == INSUFFICIENT_CONTEXT_ANSWER
+    assert result["sources"] is sources
+    assert result["max_relevance_score"] == 0.34
+    assert result["relevance_threshold"] == 0.35
+    assert result["generation_elapsed_ms"] == 0.0
+    assert prompt_builder.requests == []
+    assert generation.prompts == []
+    assert calls == ["embedding", "retriever"]
+
+
+@pytest.mark.parametrize("score", [None, "0.9", True, -1.1, 1.1, float("nan"), float("inf")])
+def test_invalid_top_score_is_rejected(score: object) -> None:
+    sources = [{"rank": 1, "score": score, "text": "资料", "chunk_index": 0}]
+    service, _, _, prompt_builder, generation, _ = make_pipeline(sources)
+
+    with pytest.raises(ValueError, match="最高相关性分数无效"):
+        service.answer("课程问题")
+
+    assert prompt_builder.requests == []
+    assert generation.prompts == []
+
+
+def test_threshold_defaults_when_environment_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RAG_MIN_RELEVANCE_SCORE", raising=False)
+    assert resolve_min_relevance_score() == 0.35
+
+
+def test_explicit_threshold_takes_priority(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RAG_MIN_RELEVANCE_SCORE", "0.9")
+    assert resolve_min_relevance_score(0.6) == 0.6
+
+
+@pytest.mark.parametrize("value", [0, 1, 0.42])
+def test_valid_threshold_values_are_accepted(value: float) -> None:
+    assert resolve_min_relevance_score(value) == value
+
+
+@pytest.mark.parametrize("value", ["bad", "nan", "inf", "-0.1", "1.1"])
+def test_invalid_environment_threshold_is_rejected(value: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RAG_MIN_RELEVANCE_SCORE", value)
+    with pytest.raises(RagConfigurationError):
+        resolve_min_relevance_score()
+
+
+@pytest.mark.parametrize("value", [True, False, -0.1, 1.1, float("nan")])
+def test_constructor_rejects_invalid_threshold(value: object) -> None:
+    with pytest.raises(RagConfigurationError):
+        make_pipeline(min_relevance_score=value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_explicit_bool_threshold_is_rejected(value: bool) -> None:
+    with pytest.raises(RagConfigurationError):
+        resolve_min_relevance_score(value)

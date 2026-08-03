@@ -20,6 +20,23 @@ describe("createMockAskService", () => {
     const second = await secondPending
 
     expect(first.question).toBe("自定义问题")
+    expect(first.answer_status).toBe("answered")
     expect(second.sources[0].text).toContain("Service 层")
   })
+
+  it.each(["今天天气如何", "stock prices", "football news"])(
+    "returns a deterministic refusal for unrelated question %s",
+    async (question) => {
+      vi.useFakeTimers()
+      const service = createMockAskService(25)
+      const pending = service.ask({ question, top_k: 3 })
+      await vi.advanceTimersByTimeAsync(25)
+
+      const response = await pending
+
+      expect(response.answer_status).toBe("insufficient_context")
+      expect(response.generation_elapsed_ms).toBe(0)
+      expect(response.relevance_threshold).toBe(0.35)
+    },
+  )
 })

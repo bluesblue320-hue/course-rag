@@ -17,6 +17,9 @@ const validSource = {
 const validResponse = {
   question: "Service 层负责什么？",
   answer: "Service 层负责核心业务逻辑。[来源1]",
+  answer_status: "answered",
+  max_relevance_score: 0.8421,
+  relevance_threshold: 0.35,
   retrieval_elapsed_ms: 12.4,
   generation_elapsed_ms: 680.7,
   total_elapsed_ms: 693.1,
@@ -90,5 +93,60 @@ describe("AskService runtime guards", () => {
 
   it("rejects an AskApiError without code", () => {
     expect(isAskApiError({ message: "未配置" })).toBe(false)
+  })
+
+  it("accepts an insufficient-context response without a maximum score", () => {
+    expect(
+      isAskResponse({
+        ...validResponse,
+        answer_status: "insufficient_context",
+        max_relevance_score: null,
+        generation_elapsed_ms: 0,
+      }),
+    ).toBe(true)
+  })
+
+  it("rejects invalid answer statuses", () => {
+    expect(isAskResponse({ ...validResponse, answer_status: "unknown" })).toBe(false)
+  })
+
+  it("rejects invalid maximum relevance scores", () => {
+    expect(isAskResponse({ ...validResponse, max_relevance_score: Number.NaN })).toBe(false)
+    expect(isAskResponse({ ...validResponse, max_relevance_score: 1.1 })).toBe(false)
+    expect(isAskResponse({ ...validResponse, max_relevance_score: -1.1 })).toBe(false)
+  })
+
+  it("rejects invalid relevance thresholds", () => {
+    expect(isAskResponse({ ...validResponse, relevance_threshold: Number.POSITIVE_INFINITY })).toBe(false)
+    expect(isAskResponse({ ...validResponse, relevance_threshold: -0.1 })).toBe(false)
+    expect(isAskResponse({ ...validResponse, relevance_threshold: 1.1 })).toBe(false)
+  })
+
+  it("rejects a string maximum relevance score", () => {
+    expect(isAskResponse({ ...validResponse, max_relevance_score: "0.8" })).toBe(false)
+  })
+
+  it("rejects missing relevance fields", () => {
+    const {
+      relevance_threshold: _threshold,
+      ...withoutThreshold
+    } = validResponse
+    const {
+      answer_status: _status,
+      ...withoutStatus
+    } = validResponse
+
+    expect(isAskResponse(withoutThreshold)).toBe(false)
+    expect(isAskResponse(withoutStatus)).toBe(false)
+  })
+
+  it("rejects boolean answer status and infinite maximum score", () => {
+    expect(isAskResponse({ ...validResponse, answer_status: true })).toBe(false)
+    expect(
+      isAskResponse({
+        ...validResponse,
+        max_relevance_score: Number.POSITIVE_INFINITY,
+      }),
+    ).toBe(false)
   })
 })

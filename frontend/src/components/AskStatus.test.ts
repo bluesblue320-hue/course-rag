@@ -27,6 +27,10 @@ describe("AskStatus", () => {
 
   it.each([
     [
+      "RAG_NOT_CONFIGURED",
+      "问答相关性配置无效，请检查后端 RAG 配置。语义检索仍可继续使用。",
+    ],
+    [
       "LLM_NOT_CONFIGURED",
       "问答服务尚未完成配置，你仍可以切换到“语义检索”查看相关原文。",
     ],

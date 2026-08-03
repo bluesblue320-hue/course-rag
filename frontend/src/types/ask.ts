@@ -1,3 +1,5 @@
+export type AnswerStatus = "answered" | "insufficient_context"
+
 export interface AskRequest {
   question: string
   top_k: number
@@ -13,6 +15,9 @@ export interface AskSource {
 export interface AskResponse {
   question: string
   answer: string
+  answer_status: AnswerStatus
+  max_relevance_score: number | null
+  relevance_threshold: number
   retrieval_elapsed_ms: number
   generation_elapsed_ms: number
   total_elapsed_ms: number

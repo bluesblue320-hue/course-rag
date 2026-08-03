@@ -11,3 +11,7 @@ class GenerationConfigurationError(RagError):
 
 class GenerationError(RagError):
     """Raised when answer generation fails."""
+
+
+class RagConfigurationError(Exception):
+    """Raised when RAG-specific configuration is invalid."""

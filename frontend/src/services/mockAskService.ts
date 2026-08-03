@@ -1,4 +1,7 @@
-import { MOCK_ASK_RESPONSE } from "../mocks/askResponses"
+import {
+  MOCK_ANSWERED_RESPONSE,
+  MOCK_INSUFFICIENT_CONTEXT_RESPONSE,
+} from "../mocks/askResponses"
 import type { AskService } from "./askService"
 
 function wait(delayMs: number): Promise<void> {
@@ -19,10 +22,18 @@ export function createMockAskService(delayMs = 500): AskService {
       }
 
       await wait(delayMs)
+      const normalizedQuestion = question.toLowerCase()
+      const shouldRefuse = [
+        "天气", "weather", "股票", "stock", "足球", "football",
+      ].some((keyword) => normalizedQuestion.includes(keyword))
+      const response = shouldRefuse
+        ? MOCK_INSUFFICIENT_CONTEXT_RESPONSE
+        : MOCK_ANSWERED_RESPONSE
+
       return {
-        ...MOCK_ASK_RESPONSE,
+        ...response,
         question,
-        sources: MOCK_ASK_RESPONSE.sources.map((source) => ({ ...source })),
+        sources: response.sources.map((source) => ({ ...source })),
       }
     },
   }

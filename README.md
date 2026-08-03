@@ -16,6 +16,8 @@
 - 使用 PromptBuilder 组装回答规则、检索来源和用户问题
 - 使用 GenerationService 调用可配置的 OpenAI-compatible LLM
 - 使用 RagService 编排 Embedding、检索、Prompt 和答案生成
+- 使用可配置的相关性阈值判断检索资料是否足以支撑回答
+- 资料不足时返回结构化拒答和检索候选，不构建 Prompt、不调用 LLM
 - 通过 FastAPI `/ask` 返回答案、来源、模型名和各阶段耗时
 - 通过 Vue 3 页面在“智能问答”和“语义检索”之间切换
 - 智能问答模式调用 `/api/ask`，展示最终答案、引用来源、模型和耗时
@@ -94,9 +96,12 @@ LLM_API_KEY=
 LLM_BASE_URL=
 LLM_MODEL=
 LLM_TIMEOUT_SECONDS=30
+RAG_MIN_RELEVANCE_SCORE=0.35
 ```
 
 FastAPI 启动时会通过 `python-dotenv` 自动读取项目根目录的 `.env`，且不会覆盖已有的进程环境变量。`LLM_API_KEY` 和 `LLM_MODEL` 必填；`LLM_BASE_URL` 默认是 `https://api.openai.com/v1`，`LLM_TIMEOUT_SECONDS` 默认是 `30` 且必须大于 `0`。`.env` 包含密钥，绝不能提交到 Git；`.env.example` 只能保留不含真实值的字段模板。
+
+`RAG_MIN_RELEVANCE_SCORE` 默认是 `0.35`，必须是 `[0, 1]` 内的有限数字。最高检索分数大于或等于阈值时才生成答案；低于阈值或没有检索结果时，`/ask` 返回 HTTP 200、`answer_status=insufficient_context`、固定的资料不足说明和原始检索候选，并将生成耗时记为 `0`。`/search` 不受问答阈值影响，始终保留原始 Top-K 结果。`0.35` 只是当前阶段的初始启发式设置，尚未通过评估集优化，后续需要结合评估数据调整。
 
 也可以在当前 PowerShell 会话中设置进程环境变量；这些值优先于 `.env`：
 
@@ -140,11 +145,13 @@ curl.exe http://127.0.0.1:8000/health
   "status": "ok",
   "chunk_count": 8,
   "retrieval_ready": true,
-  "generation_ready": false
+  "generation_ready": false,
+  "rag_ready": false,
+  "min_relevance_score": null
 }
 ```
 
-检索索引成功初始化后，`status` 保持为 `"ok"`；`generation_ready` 仅在完整的问答服务可用时为 `true`。
+检索索引成功初始化后，`status` 保持为 `"ok"`。`generation_ready` 表示 LLM 客户端可用，`rag_ready` 表示 LLM 和相关性阈值都已正确配置；阈值无效不会阻止 `/search`，但 `/ask` 会返回 `503 RAG_NOT_CONFIGURED`。
 
 检索请求：
 
@@ -164,7 +171,7 @@ curl.exe -X POST http://127.0.0.1:8000/ask `
   -d '{"question":"Service 层负责什么？","top_k":3}'
 ```
 
-`question` 清理后长度必须为 1 到 500，`top_k` 默认是 `3` 且范围为 1 到 10。`/ask` 返回生成答案、Top-K 来源、Embedding 与 LLM 模型名，以及检索、生成和总耗时。LLM 调用失败返回统一的 `502` 响应，配置缺失返回统一的 `503` 响应，不会向客户端暴露上游完整错误。
+`question` 清理后长度必须为 1 到 500，`top_k` 默认是 `3` 且范围为 1 到 10。`/ask` 始终以 HTTP 200 返回 `answered` 或 `insufficient_context` 两种业务状态，并包含 `max_relevance_score`、`relevance_threshold`、检索候选和耗时。只有 `answered` 会调用 LLM；LLM 调用失败返回统一的 `502`，LLM 或 RAG 配置不可用返回安全的 `503`，不会暴露内部配置值或上游完整错误。
 
 `/search` 始终只返回原始检索结果；`/ask` 才会执行 Prompt 构造和 LLM 回答生成。
 
@@ -247,7 +254,9 @@ knowledge.txt
     ↓ 与文档向量计算余弦相似度
 Top K 原文
     ├── `/search`：直接返回检索结果
-    └── `/ask`：PromptBuilder → GenerationService → 答案和来源
+    └── `/ask`：比较最高分与相关性阈值
+          ├── 达到阈值：PromptBuilder → GenerationService → answered
+          └── 低于阈值/无结果：固定拒答 → insufficient_context
 ```
 
 Vue 前端通过模式切换分别使用 `/ask` 和 `/search` 两个分支；两种模式共用问题输入，但分别保留最近的请求状态和结果。
@@ -294,4 +303,4 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 ## 当前范围之外
 
-当前 Web 应用已经支持单轮、带来源的课程知识问答和独立语义检索。PDF、文件上传、数据库、向量数据库、相似度阈值、评估集、多轮记忆、LangChain、LangGraph 与 Agent 仍未实现。
+当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答和独立语义检索。PDF、文件上传、数据库、向量数据库、评估集、多轮记忆、LangChain、LangGraph 与 Agent 仍未实现。

@@ -15,6 +15,9 @@ import type { SearchResponse } from "./types/search"
 const askResponse: AskResponse = {
   question: "Service 层负责什么？",
   answer: "Service 层负责核心业务逻辑。[来源1]",
+  answer_status: "answered",
+  max_relevance_score: 0.8421,
+  relevance_threshold: 0.35,
   retrieval_elapsed_ms: 12.4,
   generation_elapsed_ms: 680.7,
   total_elapsed_ms: 693.1,
@@ -192,6 +195,58 @@ describe("App", () => {
     await modeButtons(wrapper)[1].trigger("click")
     expect(wrapper.text()).toContain("课程知识检索")
   })
+
+  it("renders insufficient context as candidates rather than citations", async () => {
+    const insufficientResponse: AskResponse = {
+      ...askResponse,
+      answer: "当前课程资料中没有足够信息回答这个问题。",
+      answer_status: "insufficient_context",
+      max_relevance_score: 0.12,
+      generation_elapsed_ms: 0,
+    }
+    const wrapper = mountApp({
+      ask: vi.fn().mockResolvedValue(insufficientResponse),
+    })
+
+    await wrapper.get("textarea").setValue("今天天气怎么样？")
+    await wrapper.get("form").trigger("submit")
+    await flushPromises()
+
+    expect(wrapper.text()).toContain("资料不足")
+    expect(wrapper.text()).toContain("检索候选（1）")
+    expect(wrapper.text()).toContain("0.1200")
+    expect(wrapper.text()).not.toContain("引用来源（1）")
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain("重试")
+
+    await modeButtons(wrapper)[1].trigger("click")
+    expect(wrapper.text()).toContain("课程知识检索")
+    expect(wrapper.get("textarea").element.value).toBe("今天天气怎么样？")
+  })
+
+  it("shows safe RAG configuration guidance and keeps retrieval available", async () => {
+    const wrapper = mountApp({
+      ask: vi.fn().mockRejectedValue(
+        new AskServiceError(
+          "untrusted backend detail",
+          "RAG_NOT_CONFIGURED",
+          503,
+        ),
+      ),
+    })
+
+    await wrapper.get("textarea").setValue("问题")
+    await wrapper.get("form").trigger("submit")
+    await flushPromises()
+
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "语义检索仍可继续使用。",
+    )
+    expect(wrapper.text()).not.toContain("untrusted backend detail")
+    await modeButtons(wrapper)[1].trigger("click")
+    expect(wrapper.text()).toContain("课程知识检索")
+  })
+
 
   it("renders the retrieval empty state without fake result cards", async () => {
     const searchService = {

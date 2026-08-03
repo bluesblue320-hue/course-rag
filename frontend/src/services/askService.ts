@@ -37,6 +37,14 @@ function isFiniteNonNegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
 }
 
+function isRelevanceScore(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= -1 && value <= 1
+}
+
+function isRelevanceThreshold(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+}
+
 export function isAskSource(value: unknown): value is AskSource {
   if (!isRecord(value)) {
     return false
@@ -63,6 +71,11 @@ export function isAskResponse(value: unknown): value is AskResponse {
   return (
     typeof value.question === "string" &&
     typeof value.answer === "string" &&
+    (value.answer_status === "answered" ||
+      value.answer_status === "insufficient_context") &&
+    (value.max_relevance_score === null ||
+      isRelevanceScore(value.max_relevance_score)) &&
+    isRelevanceThreshold(value.relevance_threshold) &&
     isFiniteNonNegative(value.retrieval_elapsed_ms) &&
     isFiniteNonNegative(value.generation_elapsed_ms) &&
     isFiniteNonNegative(value.total_elapsed_ms) &&

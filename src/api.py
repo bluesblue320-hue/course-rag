@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -12,11 +13,18 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.chunker import split_text
 from src.embedding import EmbeddingService
-from src.exceptions import GenerationConfigurationError, GenerationError
+from src.exceptions import (
+    GenerationConfigurationError,
+    GenerationError,
+    RagConfigurationError,
+)
 from src.generation import GenerationService
 from src.loader import load_text
 from src.prompt_builder import PromptBuilder
-from src.rag_service import RagService
+from src.rag_service import (
+    RagService,
+    resolve_min_relevance_score,
+)
 from src.retriever import SemanticRetriever
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -42,7 +50,10 @@ def initialize_search(app: FastAPI) -> None:
     app.state.rag_service = None
     app.state.llm_model_name = None
     app.state.generation_ready = False
+    app.state.rag_ready = False
     app.state.generation_configuration_error = None
+    app.state.rag_configuration_error = None
+    app.state.min_relevance_score = None
 
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
@@ -51,23 +62,31 @@ def initialize_search(app: FastAPI) -> None:
     except GenerationConfigurationError as exc:
         app.state.generation_configuration_error = exc
     else:
-        rag_service = RagService(
-            embedding_service=embedding_service,
-            retriever=retriever,
-            prompt_builder=prompt_builder,
-            generation_service=generation_service,
-        )
         app.state.generation_service = generation_service
-        app.state.rag_service = rag_service
         app.state.llm_model_name = generation_service.model_name
         app.state.generation_ready = True
+        try:
+            min_relevance_score = resolve_min_relevance_score()
+            rag_service = RagService(
+                embedding_service=embedding_service,
+                retriever=retriever,
+                prompt_builder=prompt_builder,
+                generation_service=generation_service,
+                min_relevance_score=min_relevance_score,
+            )
+        except RagConfigurationError as exc:
+            app.state.rag_configuration_error = exc
+            return
+        app.state.rag_service = rag_service
+        app.state.rag_ready = True
+        app.state.min_relevance_score = min_relevance_score
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Initialize shared services and close owned resources on shutdown."""
-    initialize_search(app)
     try:
+        initialize_search(app)
         yield
     finally:
         generation_service = getattr(
@@ -86,6 +105,8 @@ class HealthResponse(BaseModel):
     chunk_count: int
     retrieval_ready: bool
     generation_ready: bool
+    rag_ready: bool
+    min_relevance_score: float | None
 
 
 class SearchRequest(BaseModel):
@@ -155,6 +176,9 @@ class AskResponse(BaseModel):
 
     question: str
     answer: str
+    answer_status: Literal["answered", "insufficient_context"]
+    max_relevance_score: float | None
+    relevance_threshold: float
     retrieval_elapsed_ms: float
     generation_elapsed_ms: float
     total_elapsed_ms: float
@@ -199,6 +223,21 @@ async def handle_generation_configuration_error(
     )
 
 
+@app.exception_handler(RagConfigurationError)
+async def handle_rag_configuration_error(
+    _request: Request,
+    _error: RagConfigurationError,
+) -> JSONResponse:
+    """Report invalid RAG configuration without exposing raw values."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "RAG_NOT_CONFIGURED",
+            "message": "问答相关性配置无效",
+        },
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 def health(request: Request) -> HealthResponse:
     """Return readiness for retrieval and answer generation."""
@@ -207,6 +246,8 @@ def health(request: Request) -> HealthResponse:
         chunk_count=request.app.state.chunk_count,
         retrieval_ready=request.app.state.retrieval_ready,
         generation_ready=request.app.state.generation_ready,
+        rag_ready=request.app.state.rag_ready,
+        min_relevance_score=request.app.state.min_relevance_score,
     )
 
 
@@ -236,6 +277,9 @@ def ask(payload: AskRequest, request: Request) -> AskResponse:
     """Delegate one validated question to the initialized RAG pipeline."""
     rag_service = request.app.state.rag_service
     if rag_service is None:
+        rag_configuration_error = request.app.state.rag_configuration_error
+        if rag_configuration_error is not None:
+            raise rag_configuration_error
         raise GenerationConfigurationError("问答服务尚未完成配置")
 
     result = rag_service.answer(

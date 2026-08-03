@@ -21,7 +21,7 @@ const sources: AskSource[] = [
 
 describe("AnswerSources", () => {
   it("shows the source count and preserves backend order", () => {
-    const wrapper = mount(AnswerSources, { props: { sources } })
+    const wrapper = mount(AnswerSources, { props: { sources, answerStatus: "answered" } })
     const cards = wrapper.findAll("details")
 
     expect(wrapper.text()).toContain("引用来源（2）")
@@ -31,7 +31,7 @@ describe("AnswerSources", () => {
   })
 
   it("shows source rank, four-decimal score, chunk index, and text", () => {
-    const wrapper = mount(AnswerSources, { props: { sources } })
+    const wrapper = mount(AnswerSources, { props: { sources, answerStatus: "answered" } })
 
     expect(wrapper.text()).toContain("[来源1]")
     expect(wrapper.text()).toContain("相似度：0.8421")
@@ -42,10 +42,29 @@ describe("AnswerSources", () => {
   })
 
   it("shows a clear empty state", () => {
-    const wrapper = mount(AnswerSources, { props: { sources: [] } })
+    const wrapper = mount(AnswerSources, { props: { sources: [], answerStatus: "answered" } })
 
     expect(wrapper.text()).toContain("引用来源（0）")
     expect(wrapper.text()).toContain("本次回答没有返回引用来源")
     expect(wrapper.findAll("details")).toHaveLength(0)
+  })
+
+  it("labels low-relevance sources as candidates", () => {
+    const wrapper = mount(AnswerSources, {
+      props: { sources, answerStatus: "insufficient_context" },
+    })
+
+    expect(wrapper.text()).toContain("检索候选（2）")
+    expect(wrapper.text()).toContain("未交给 LLM 生成答案")
+    expect(wrapper.text()).not.toContain("引用来源（2）")
+  })
+
+  it("shows the candidate-specific empty state", () => {
+    const wrapper = mount(AnswerSources, {
+      props: { sources: [], answerStatus: "insufficient_context" },
+    })
+
+    expect(wrapper.text()).toContain("检索候选（0）")
+    expect(wrapper.text()).toContain("没有检索到课程资料候选")
   })
 })

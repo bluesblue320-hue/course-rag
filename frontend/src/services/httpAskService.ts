@@ -41,6 +41,13 @@ function errorForStatus(status: number, payload: unknown): AskServiceError {
       status,
     )
   }
+  if (status === 503 && parsedCode === "RAG_NOT_CONFIGURED") {
+    return new AskServiceError(
+      "问答相关性配置无效，请检查后端 RAG 配置",
+      "RAG_NOT_CONFIGURED",
+      status,
+    )
+  }
   if (status === 503) {
     return new AskServiceError(
       "问答服务尚未完成配置，你仍可使用语义检索",

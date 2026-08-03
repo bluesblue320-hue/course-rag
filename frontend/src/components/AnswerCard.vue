@@ -1,20 +1,32 @@
 <script setup lang="ts">
+import { computed } from "vue"
+
 import type { AskResponse } from "../types/ask"
 
-defineProps<{
+const props = defineProps<{
   response: AskResponse
 }>()
 
+const isInsufficient = computed(
+  () => props.response.answer_status === "insufficient_context",
+)
+
 function formatMilliseconds(value: number): string {
   return `${value} ms`
+}
+
+function formatRelevance(value: number | null): string {
+  return value === null ? "无检索结果" : value.toFixed(4)
 }
 </script>
 
 <template>
   <article class="answer-card" aria-labelledby="answer-heading">
     <header>
-      <p class="answer-label">GROUNDED ANSWER</p>
-      <h2 id="answer-heading">AI 回答</h2>
+      <p class="answer-label">
+        {{ isInsufficient ? "未调用 LLM" : "已基于课程资料生成" }}
+      </p>
+      <h2 id="answer-heading">{{ isInsufficient ? "当前资料不足" : "AI 回答" }}</h2>
       <p class="question">{{ response.question }}</p>
     </header>
 
@@ -43,6 +55,17 @@ function formatMilliseconds(value: number): string {
       <div>
         <dt>LLM 模型</dt>
         <dd>{{ response.llm_model }}</dd>
+      </div>
+    </dl>
+
+    <dl class="relevance" aria-label="相关性判断">
+      <div>
+        <dt>最高相似度</dt>
+        <dd>{{ formatRelevance(response.max_relevance_score) }}</dd>
+      </div>
+      <div>
+        <dt>生成阈值</dt>
+        <dd>{{ response.relevance_threshold.toFixed(4) }}</dd>
       </div>
     </dl>
   </article>
@@ -102,14 +125,16 @@ dl {
 }
 
 .timings div,
-.models div {
+.models div,
+.relevance div {
   min-width: 0;
   padding: var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
 }
 
-.models {
+.models,
+.relevance {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
@@ -128,7 +153,8 @@ dd {
 
 @media (max-width: 560px) {
   .timings,
-  .models {
+  .models,
+  .relevance {
     grid-template-columns: minmax(0, 1fr);
   }
 }
