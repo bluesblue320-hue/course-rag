@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
 
-import type { AskService } from "../services/askService"
-import { AskServiceError } from "../services/httpAskService"
+import {
+  AskServiceError,
+  type AskService,
+} from "../services/askService"
 import type { AskResponse } from "../types/ask"
 import { useKnowledgeAsk } from "./useKnowledgeAsk"
 

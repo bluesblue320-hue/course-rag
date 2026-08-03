@@ -1,25 +1,10 @@
 import type { AskRequest, AskResponse } from "../types/ask"
 import {
+  AskServiceError,
   isAskApiError,
   isAskResponse,
   type AskService,
 } from "./askService"
-
-export class AskServiceError extends Error {
-  public readonly code?: string
-  public readonly httpStatus?: number
-
-  constructor(
-    message: string,
-    code?: string,
-    httpStatus?: number,
-  ) {
-    super(message)
-    this.name = "AskServiceError"
-    this.code = code
-    this.httpStatus = httpStatus
-  }
-}
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, "")

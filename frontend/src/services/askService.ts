@@ -13,6 +13,22 @@ export interface AskService {
 
 export const askServiceKey: InjectionKey<AskService> = Symbol("askService")
 
+export class AskServiceError extends Error {
+  public readonly code?: string
+  public readonly httpStatus?: number
+
+  constructor(
+    message: string,
+    code?: string,
+    httpStatus?: number,
+  ) {
+    super(message)
+    this.name = "AskServiceError"
+    this.code = code
+    this.httpStatus = httpStatus
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }

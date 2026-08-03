@@ -2,9 +2,11 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils"
 import { describe, expect, it, vi } from "vitest"
 
 import App from "./App.vue"
-import type { AskService } from "./services/askService"
-import { askServiceKey } from "./services/askService"
-import { AskServiceError } from "./services/httpAskService"
+import {
+  AskServiceError,
+  askServiceKey,
+  type AskService,
+} from "./services/askService"
 import type { SearchService } from "./services/searchService"
 import { searchServiceKey } from "./services/searchService"
 import type { AskResponse } from "./types/ask"

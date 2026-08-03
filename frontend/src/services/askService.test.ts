@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { isAskApiError, isAskResponse, isAskSource } from "./askService"
+import {
+  AskServiceError,
+  isAskApiError,
+  isAskResponse,
+  isAskSource,
+} from "./askService"
 
 const validSource = {
   rank: 1,
@@ -21,6 +26,20 @@ const validResponse = {
 }
 
 describe("AskService runtime guards", () => {
+  it("exposes a shared error type with code and HTTP status", () => {
+    const error = new AskServiceError(
+      "回答生成失败",
+      "GENERATION_FAILED",
+      502,
+    )
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error.name).toBe("AskServiceError")
+    expect(error.message).toBe("回答生成失败")
+    expect(error.code).toBe("GENERATION_FAILED")
+    expect(error.httpStatus).toBe(502)
+  })
+
   it("accepts a complete AskResponse", () => {
     expect(isAskResponse(validResponse)).toBe(true)
   })

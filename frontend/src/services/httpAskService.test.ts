@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
-import { AskServiceError, createHttpAskService } from "./httpAskService"
+import { AskServiceError } from "./askService"
+import { createHttpAskService } from "./httpAskService"
 
 const validResponse = {
   question: "Service 层负责什么？",

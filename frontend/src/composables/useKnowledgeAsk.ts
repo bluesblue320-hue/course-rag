@@ -1,7 +1,10 @@
 import { computed, ref } from "vue"
 
-import { isAskResponse, type AskService } from "../services/askService"
-import { AskServiceError } from "../services/httpAskService"
+import {
+  AskServiceError,
+  isAskResponse,
+  type AskService,
+} from "../services/askService"
 import type { AskState } from "../types/ask"
 
 function normalizedError(error: unknown): {
