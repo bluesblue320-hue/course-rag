@@ -12,7 +12,7 @@
     </div>
 
     <nav aria-label="主导航">
-      <span class="nav-item active" aria-current="page">语义检索</span>
+      <span class="nav-item active" aria-current="page">知识问答</span>
       <span class="nav-item" aria-disabled="true">知识资料</span>
       <span class="nav-item" aria-disabled="true">学习说明</span>
     </nav>

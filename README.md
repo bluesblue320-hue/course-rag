@@ -17,13 +17,16 @@
 - 使用 GenerationService 调用可配置的 OpenAI-compatible LLM
 - 使用 RagService 编排 Embedding、检索、Prompt 和答案生成
 - 通过 FastAPI `/ask` 返回答案、来源、模型名和各阶段耗时
-- 通过 Vue 3 页面提交问题并展示真实检索结果
+- 通过 Vue 3 页面在“智能问答”和“语义检索”之间切换
+- 智能问答模式调用 `/api/ask`，展示最终答案、引用来源、模型和耗时
+- 语义检索模式继续调用 `/api/search`，展示原始 Top-K 检索结果
+- 对问答请求的 422、502、503 和网络错误提供稳定、安全的页面提示
 - 通过 Vite `/api` 代理连接浏览器与 FastAPI
 - 返回检索耗时、模型名和已索引 Chunk 数量
 
 ## 当前没有实现
 
-后端已经完成从语义检索到 LLM 回答生成的 RAG 闭环，但 Vue 前端暂时仍只调用 `/search` 并展示原始检索结果，尚未提供问答页面。本项目仍未支持 PDF、数据库、向量数据库、LangChain、LangGraph 或 Agent。
+后端和 Vue 前端已经打通从语义检索到 LLM 回答展示的 RAG 闭环。本项目仍未支持 PDF、文件上传、数据库、向量数据库、评估集、多轮记忆、LangChain、LangGraph 或 Agent。
 
 ## 项目目录
 
@@ -43,7 +46,9 @@ course-rag/
 │   └── main.py               # 命令行入口
 ├── tests/                    # 离线单元测试
 ├── frontend/                 # Vue 3 + Vite + TypeScript 前端
-│   ├── src/services/         # 真实 HTTP 服务与可选模拟服务
+│   ├── src/services/         # Search/Ask HTTP 服务与可选模拟服务
+│   ├── src/composables/      # 两种模式的独立状态管理
+│   ├── src/components/       # 检索、答案、来源与状态组件
 │   └── README.md             # 前端运行与学习说明
 ├── requirements.txt          # Python 依赖
 └── README.md                 # 学习说明
@@ -191,12 +196,15 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-浏览器打开 `http://127.0.0.1:5173`。前端目前只请求 `/api/search`，不会调用 `/ask`。Vite 会把 `/api` 代理到 `http://127.0.0.1:8000`，因此开发环境不需要额外配置 CORS。
+浏览器打开 `http://127.0.0.1:5173`。智能问答模式请求 `/api/ask`，语义检索模式请求 `/api/search`；Vite 会移除 `/api` 前缀并代理到 `http://127.0.0.1:8000`，因此开发环境不需要额外配置 CORS。
+
+配置好根目录 `.env` 中的后端 LLM 环境变量后，智能问答可以调用真实模型。未配置 LLM 时，智能问答会展示 503 提示，但不依赖 LLM 的语义检索仍可正常使用。真实 `.env` 不得提交到 Git。
 
 如果只想演示界面、不启动 Python 后端，可以在启动 Vite 前设置：
 
 ```powershell
 $env:VITE_USE_MOCK_SEARCH="true"
+$env:VITE_USE_MOCK_ASK="true"
 npm.cmd run dev
 ```
 
@@ -242,7 +250,7 @@ Top K 原文
     └── `/ask`：PromptBuilder → GenerationService → 答案和来源
 ```
 
-Vue 前端当前使用 `/search` 分支；完整的后端 RAG 闭环可以通过 `/ask` 单独调用。
+Vue 前端通过模式切换分别使用 `/ask` 和 `/search` 两个分支；两种模式共用问题输入，但分别保留最近的请求状态和结果。
 
 ## 四个核心概念
 
@@ -284,6 +292,6 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 可以使用前文的进程级执行策略命令，或直接运行 `.\.venv\Scripts\python.exe`，无需激活。
 
-## 下一阶段
+## 当前范围之外
 
-后端问答链路已经打通。后续可以让 Vue 前端调用 `/ask` 并展示答案与来源；该问答页面以及 PDF、数据库和向量数据库支持目前都尚未实现。
+当前 Web 应用已经支持单轮、带来源的课程知识问答和独立语义检索。PDF、文件上传、数据库、向量数据库、相似度阈值、评估集、多轮记忆、LangChain、LangGraph 与 Agent 仍未实现。

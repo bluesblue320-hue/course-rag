@@ -9,7 +9,7 @@ describe("information panels", () => {
   it("shows the active search area and disabled placeholders", () => {
     const wrapper = mount(AppSidebar)
 
-    expect(wrapper.get('[aria-current="page"]').text()).toBe("语义检索")
+    expect(wrapper.get('[aria-current="page"]').text()).toBe("知识问答")
     expect(wrapper.findAll('[aria-disabled="true"]')).toHaveLength(2)
     expect(wrapper.text()).toContain("本地知识库 · 已就绪")
   })

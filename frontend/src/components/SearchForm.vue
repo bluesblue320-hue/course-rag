@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { computed, ref } from "vue"
 
+import type { QueryMode } from "../types/queryMode"
+
 const props = withDefaults(
   defineProps<{
+    mode?: QueryMode
     loading?: boolean
   }>(),
   {
+    mode: "ask",
     loading: false,
   },
 )
@@ -18,6 +22,21 @@ const query = ref("")
 const validationMessage = ref("")
 const describedBy = computed(() =>
   validationMessage.value ? "query-hint query-error" : "query-hint",
+)
+const copy = computed(() =>
+  props.mode === "ask"
+    ? {
+        label: "向课程知识库提问",
+        hint: "按 Enter 生成回答，Shift + Enter 换行",
+        idleButton: "生成回答",
+        loadingButton: "生成中…",
+      }
+    : {
+        label: "检索课程知识",
+        hint: "按 Enter 检索，Shift + Enter 换行",
+        idleButton: "开始检索",
+        loadingButton: "检索中…",
+      },
 )
 
 function submit(): void {
@@ -40,7 +59,7 @@ function handleKeydown(event: KeyboardEvent): void {
 
 <template>
   <form class="search-form" @submit.prevent="submit">
-    <label for="knowledge-query">向知识库提问</label>
+    <label for="knowledge-query">{{ copy.label }}</label>
     <textarea
       id="knowledge-query"
       v-model="query"
@@ -55,9 +74,9 @@ function handleKeydown(event: KeyboardEvent): void {
     />
 
     <div class="form-footer">
-      <span id="query-hint">按 Enter 检索，Shift + Enter 换行</span>
+      <span id="query-hint">{{ copy.hint }}</span>
       <button type="submit" :disabled="props.loading">
-        {{ props.loading ? "检索中…" : "开始检索" }}
+        {{ props.loading ? copy.loadingButton : copy.idleButton }}
       </button>
     </div>
 
