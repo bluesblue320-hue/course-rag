@@ -20,6 +20,9 @@ const validResponse = {
       score: 0.8421,
       text: "相关课程原文",
       chunk_index: 2,
+      document_id: "builtin-knowledge",
+      filename: "knowledge.txt",
+      page_number: null,
     },
   ],
 }

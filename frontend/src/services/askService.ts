@@ -45,6 +45,13 @@ function isRelevanceThreshold(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
 }
 
+function isPageNumber(value: unknown): value is number | null {
+  return (
+    value === null ||
+    (typeof value === "number" && Number.isInteger(value) && value > 0)
+  )
+}
+
 export function isAskSource(value: unknown): value is AskSource {
   if (!isRecord(value)) {
     return false
@@ -59,7 +66,10 @@ export function isAskSource(value: unknown): value is AskSource {
     typeof value.text === "string" &&
     typeof value.chunk_index === "number" &&
     Number.isInteger(value.chunk_index) &&
-    value.chunk_index >= 0
+    value.chunk_index >= 0 &&
+    typeof value.document_id === "string" &&
+    typeof value.filename === "string" &&
+    isPageNumber(value.page_number)
   )
 }
 

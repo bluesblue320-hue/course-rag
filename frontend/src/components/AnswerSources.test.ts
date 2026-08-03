@@ -10,12 +10,18 @@ const sources: AskSource[] = [
     score: 0.7,
     text: "原始顺序中的第一段",
     chunk_index: 8,
+    document_id: "doc-1",
+    filename: "notes.txt",
+    page_number: null,
   },
   {
     rank: 1,
     score: 0.8421,
     text: "原始顺序中的第二段",
     chunk_index: 2,
+    document_id: "doc-2",
+    filename: "course.pdf",
+    page_number: 12,
   },
 ]
 
@@ -39,6 +45,42 @@ describe("AnswerSources", () => {
     expect(wrapper.text()).toContain("Chunk #2")
     expect(wrapper.text()).toContain("原始顺序中的第二段")
     expect(wrapper.text()).not.toContain("页码")
+  })
+
+  it("shows the PDF page number and filename when present", () => {
+    const wrapper = mount(AnswerSources, { props: { sources, answerStatus: "answered" } })
+
+    expect(wrapper.text()).toContain("第 12 页")
+    expect(wrapper.text()).toContain("course.pdf")
+    expect(wrapper.text()).toContain("notes.txt")
+  })
+
+  it("hides the page number for sources without one", () => {
+    const noPageSources: AskSource[] = [
+      { ...sources[0], page_number: null },
+    ]
+    const wrapper = mount(AnswerSources, {
+      props: { sources: noPageSources, answerStatus: "answered" },
+    })
+
+    expect(wrapper.text()).not.toContain("第 ")
+  })
+
+  it("renders filenames as plain text, never as links", () => {
+    const hostileSources: AskSource[] = [
+      {
+        ...sources[0],
+        filename: "<img src=x onerror=alert(1)>.txt",
+        page_number: null,
+      },
+    ]
+    const wrapper = mount(AnswerSources, {
+      props: { sources: hostileSources, answerStatus: "answered" },
+    })
+
+    expect(wrapper.findAll("a")).toHaveLength(0)
+    expect(wrapper.findAll("img")).toHaveLength(0)
+    expect(wrapper.text()).toContain(".txt")
   })
 
   it("shows a clear empty state", () => {

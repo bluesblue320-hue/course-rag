@@ -92,6 +92,12 @@ def client(
     knowledge_file = tmp_path / "knowledge.txt"
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(
         api_module,
         "EmbeddingService",
@@ -146,6 +152,12 @@ def test_app_starts_without_llm_and_keeps_retrieval_available(
     knowledge_file = tmp_path / "knowledge.txt"
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(
         api_module,
         "EmbeddingService",
@@ -224,6 +236,12 @@ def test_loads_project_dotenv_before_generation_without_overriding_process_env(
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setenv("LLM_API_KEY", "process-key")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(
         api_module,
         "EmbeddingService",
@@ -254,6 +272,12 @@ def test_unexpected_generation_initialization_error_still_fails_startup(
     knowledge_file = tmp_path / "knowledge.txt"
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(
         api_module,
         "EmbeddingService",
@@ -283,6 +307,12 @@ def test_lifespan_closes_configured_generation_service(
     knowledge_file = tmp_path / "knowledge.txt"
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(
         api_module,
         "EmbeddingService",
@@ -330,6 +360,9 @@ def test_search_uses_default_top_k_and_returns_typed_results(
         "score": 1.0,
         "text": "A" * 300,
         "chunk_index": 0,
+        "document_id": "builtin-knowledge",
+        "filename": "knowledge.txt",
+        "page_number": None,
     }
     assert FakeEmbeddingService.queries == ["业务逻辑应该写在哪里？"]
 
@@ -401,6 +434,9 @@ def test_ask_returns_answer_sources_timings_and_model_names(
         "score": 1.0,
         "text": "A" * 300,
         "chunk_index": 0,
+        "document_id": "builtin-knowledge",
+        "filename": "knowledge.txt",
+        "page_number": None,
     }
     assert body["retrieval_elapsed_ms"] == 10.5
     assert body["generation_elapsed_ms"] == 720.2
@@ -419,6 +455,9 @@ def test_ask_returns_structured_insufficient_context_without_generation(
         "score": 0.1,
         "text": "最接近但仍不相关的课程资料",
         "chunk_index": 3,
+        "document_id": "builtin-knowledge",
+        "filename": "knowledge.txt",
+        "page_number": None,
     }
 
     class LowScoreRetriever:
@@ -526,6 +565,12 @@ def test_invalid_rag_configuration_keeps_search_available_and_closes_generation(
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setenv("RAG_MIN_RELEVANCE_SCORE", "not-a-secret-value")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(api_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(api_module, "GenerationService", FakeGenerationService)
     monkeypatch.setattr(
@@ -572,6 +617,12 @@ def test_unexpected_rag_initialization_error_closes_generation_and_fails_startup
     knowledge_file = tmp_path / "knowledge.txt"
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(api_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(api_module, "GenerationService", FakeGenerationService)
     monkeypatch.setattr(api_module, "RagService", UnexpectedlyFailingRagService)
@@ -596,6 +647,12 @@ def test_dotenv_and_generation_are_initialized_before_threshold_resolution(
     knowledge_file = tmp_path / "knowledge.txt"
     knowledge_file.write_text("A" * 900, encoding="utf-8")
     monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
     monkeypatch.setattr(api_module, "EmbeddingService", FakeEmbeddingService)
     monkeypatch.setattr(api_module, "GenerationService", FakeGenerationService)
     monkeypatch.setattr(api_module, "load_dotenv", lambda **kwargs: events.append("dotenv"))

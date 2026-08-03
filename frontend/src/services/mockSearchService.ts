@@ -3,6 +3,7 @@ import {
   DATABASE_RESULTS,
   DEFAULT_INDEX_METADATA,
   EMBEDDING_RESULTS,
+  UPLOADED_RESULTS,
 } from "../mocks/searchResponses"
 import type { SearchResult } from "../types/search"
 import type { SearchService } from "./searchService"
@@ -10,6 +11,7 @@ import type { SearchService } from "./searchService"
 const BUSINESS_KEYWORDS = ["业务", "service", "逻辑"]
 const DATABASE_KEYWORDS = ["数据库", "repository", "postgresql", "sql"]
 const EMBEDDING_KEYWORDS = ["向量", "embedding", "余弦"]
+const UPLOADED_KEYWORDS = ["讲义", "上传"]
 
 function includesKeyword(query: string, keywords: string[]): boolean {
   const normalized = query.toLowerCase()
@@ -17,6 +19,9 @@ function includesKeyword(query: string, keywords: string[]): boolean {
 }
 
 function selectResults(query: string): SearchResult[] {
+  if (includesKeyword(query, UPLOADED_KEYWORDS)) {
+    return UPLOADED_RESULTS
+  }
   if (includesKeyword(query, BUSINESS_KEYWORDS)) {
     return BUSINESS_RESULTS
   }

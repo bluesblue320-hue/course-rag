@@ -14,6 +14,13 @@ export const searchServiceKey: InjectionKey<SearchService> = Symbol(
   "searchService",
 )
 
+function isPageNumber(value: unknown): value is number | null {
+  return (
+    value === null ||
+    (typeof value === "number" && Number.isInteger(value) && value > 0)
+  )
+}
+
 function isSearchResult(value: unknown): value is SearchResult {
   if (typeof value !== "object" || value === null) {
     return false
@@ -24,7 +31,10 @@ function isSearchResult(value: unknown): value is SearchResult {
     typeof result.rank === "number" &&
     typeof result.score === "number" &&
     typeof result.chunk_index === "number" &&
-    typeof result.text === "string"
+    typeof result.text === "string" &&
+    typeof result.document_id === "string" &&
+    typeof result.filename === "string" &&
+    isPageNumber(result.page_number)
   )
 }
 

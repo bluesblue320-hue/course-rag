@@ -7,9 +7,17 @@ import {
   askServiceKey,
   type AskService,
 } from "./services/askService"
+import {
+  documentServiceKey,
+  type DocumentService,
+} from "./services/documentService"
 import type { SearchService } from "./services/searchService"
 import { searchServiceKey } from "./services/searchService"
 import type { AskResponse } from "./types/ask"
+import type {
+  DeleteDocumentResponse,
+  Document,
+} from "./types/documents"
 import type { SearchResponse } from "./types/search"
 
 const askResponse: AskResponse = {
@@ -29,6 +37,9 @@ const askResponse: AskResponse = {
       score: 0.8421,
       chunk_index: 2,
       text: "Service 层负责核心业务逻辑。",
+      document_id: "builtin-knowledge",
+      filename: "knowledge.txt",
+      page_number: null,
     },
   ],
 }
@@ -44,18 +55,27 @@ const searchResponse: SearchResponse = {
       score: 0.8421,
       chunk_index: 2,
       text: "service 层负责业务逻辑。",
+      document_id: "builtin-knowledge",
+      filename: "knowledge.txt",
+      page_number: null,
     },
     {
       rank: 2,
       score: 0.7168,
       chunk_index: 1,
       text: "router 层接收 HTTP 请求。",
+      document_id: "builtin-knowledge",
+      filename: "knowledge.txt",
+      page_number: null,
     },
     {
       rank: 3,
       score: 0.6234,
       chunk_index: 3,
       text: "repository 层负责数据访问。",
+      document_id: "builtin-knowledge",
+      filename: "knowledge.txt",
+      page_number: null,
     },
   ],
 }
@@ -65,12 +85,16 @@ function mountApp(
   searchService: SearchService = {
     search: vi.fn().mockResolvedValue(searchResponse),
   },
+  documentService?: DocumentService,
 ): VueWrapper {
   return mount(App, {
     global: {
       provide: {
         [askServiceKey as symbol]: askService,
         [searchServiceKey as symbol]: searchService,
+        ...(documentService
+          ? { [documentServiceKey as symbol]: documentService }
+          : {}),
       },
     },
   })
@@ -265,5 +289,143 @@ describe("App", () => {
 
     expect(wrapper.text()).toContain("请换一种问法")
     expect(wrapper.findAll(".result-card")).toHaveLength(0)
+  })
+
+  it("enters knowledge base management and loads the document list", async () => {
+    const listDocuments = vi.fn().mockResolvedValue({
+      documents: [],
+      document_count: 0,
+      chunk_count: 0,
+    })
+    const documentService: DocumentService = {
+      listDocuments,
+      uploadDocument: vi.fn(),
+      deleteDocument: vi.fn(),
+    }
+    const wrapper = mountApp(undefined, undefined, documentService)
+
+    await modeButtons(wrapper)[2].trigger("click")
+
+    expect(wrapper.text()).toContain("知识库管理")
+    expect(wrapper.text()).toContain("上传课程资料")
+    expect(wrapper.text()).toContain("知识库文档")
+    expect(wrapper.get("textarea").isVisible()).toBe(false)
+    await flushPromises()
+    expect(listDocuments).toHaveBeenCalled()
+  })
+
+  it("refreshes the document list after a successful upload", async () => {
+    const uploadedDocument: Document = {
+      document_id: "doc-1",
+      filename: "notes.txt",
+      content_type: "text/plain",
+      size_bytes: 1024,
+      text_length: 512,
+      chunk_count: 3,
+      created_at: "2026-08-03T08:00:00Z",
+      is_builtin: false,
+    }
+    const listDocuments = vi
+      .fn()
+      .mockResolvedValueOnce({ documents: [], document_count: 0, chunk_count: 0 })
+      .mockResolvedValueOnce({
+        documents: [uploadedDocument],
+        document_count: 1,
+        chunk_count: 3,
+      })
+    const documentService: DocumentService = {
+      listDocuments,
+      uploadDocument: vi.fn().mockResolvedValue(uploadedDocument),
+      deleteDocument: vi.fn(),
+    }
+    const wrapper = mountApp(undefined, undefined, documentService)
+    await modeButtons(wrapper)[2].trigger("click")
+    await flushPromises()
+
+    const file = new File(["alpha content"], "notes.txt", { type: "text/plain" })
+    const input = wrapper.get('input[type="file"]').element as HTMLInputElement
+    Object.defineProperty(input, "files", { value: [file] })
+    await wrapper.get('input[type="file"]').trigger("change")
+    await wrapper.get(".upload-form").trigger("submit")
+    await flushPromises()
+
+    expect(wrapper.text()).toContain("上传成功")
+    expect(wrapper.text()).toContain("notes.txt")
+  })
+
+  it("removes a document from the list after a confirmed deletion", async () => {
+    vi.stubGlobal("confirm", vi.fn().mockReturnValue(true))
+    const uploadedDocument: Document = {
+      document_id: "doc-1",
+      filename: "notes.txt",
+      content_type: "text/plain",
+      size_bytes: 1024,
+      text_length: 512,
+      chunk_count: 3,
+      created_at: "2026-08-03T08:00:00Z",
+      is_builtin: false,
+    }
+    const listDocuments = vi
+      .fn()
+      .mockResolvedValueOnce({
+        documents: [uploadedDocument],
+        document_count: 1,
+        chunk_count: 3,
+      })
+      .mockResolvedValueOnce({ documents: [], document_count: 0, chunk_count: 0 })
+    const documentService: DocumentService = {
+      listDocuments,
+      uploadDocument: vi.fn(),
+      deleteDocument: vi.fn().mockResolvedValue({
+        document_id: "doc-1",
+        deleted: true,
+        document_count: 0,
+        chunk_count: 0,
+      } satisfies DeleteDocumentResponse),
+    }
+    const wrapper = mountApp(undefined, undefined, documentService)
+    await modeButtons(wrapper)[2].trigger("click")
+    await flushPromises()
+    expect(wrapper.text()).toContain("notes.txt")
+
+    await wrapper.get("li button").trigger("click")
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain("notes.txt")
+    expect(wrapper.text()).toContain("还没有上传文档")
+    vi.unstubAllGlobals()
+  })
+
+  it("keeps ask and search fully working after visiting the knowledge base", async () => {
+    const askMethod = vi.fn().mockResolvedValue(askResponse)
+    const searchMethod = vi.fn().mockResolvedValue(searchResponse)
+    const documentService: DocumentService = {
+      listDocuments: vi.fn().mockResolvedValue({
+        documents: [],
+        document_count: 0,
+        chunk_count: 0,
+      }),
+      uploadDocument: vi.fn(),
+      deleteDocument: vi.fn(),
+    }
+    const wrapper = mountApp(
+      { ask: askMethod },
+      { search: searchMethod },
+      documentService,
+    )
+
+    await wrapper.get("textarea").setValue("Service 层负责什么？")
+    await modeButtons(wrapper)[2].trigger("click")
+    await wrapper.get("textarea").setValue("业务逻辑应该写在哪一层？")
+    await modeButtons(wrapper)[1].trigger("click")
+    expect(wrapper.get("textarea").element.value).toBe("业务逻辑应该写在哪一层？")
+    await wrapper.get("form").trigger("submit")
+    await flushPromises()
+
+    expect(searchMethod).toHaveBeenCalledWith({
+      query: "业务逻辑应该写在哪一层？",
+      top_k: 3,
+    })
+    expect(wrapper.findAll(".result-card")).toHaveLength(3)
   })
 })

@@ -12,6 +12,10 @@ defineProps<{
     <div class="result-content">
       <div class="metadata">
         <span class="top-label">TOP {{ result.rank }}</span>
+        <span class="file">{{ result.filename }}</span>
+        <span v-if="result.page_number !== null" class="page">
+          第 {{ result.page_number }} 页
+        </span>
         <span class="score">相似度 {{ result.score.toFixed(4) }}</span>
         <span class="chunk">Chunk #{{ result.chunk_index }}</span>
       </div>
@@ -62,6 +66,18 @@ defineProps<{
 .top-label {
   color: var(--color-primary);
   background: #eef3ff;
+}
+
+.file {
+  color: var(--color-text);
+  background: #f1f3f7;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.page {
+  color: var(--color-text);
+  background: #f1f3f7;
 }
 
 .score {

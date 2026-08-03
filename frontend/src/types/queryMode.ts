@@ -1,1 +1,1 @@
-export type QueryMode = "ask" | "search"
+export type QueryMode = "ask" | "search" | "documents"

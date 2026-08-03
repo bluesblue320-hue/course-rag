@@ -42,13 +42,23 @@ function select(mode: QueryMode): void {
       <strong>语义检索</strong>
       <span>查看 Top-K 课程原文</span>
     </button>
+    <button
+      type="button"
+      :class="{ active: modelValue === 'documents' }"
+      :aria-pressed="modelValue === 'documents'"
+      :disabled="disabled"
+      @click="select('documents')"
+    >
+      <strong>知识库管理</strong>
+      <span>上传、查看和删除资料</span>
+    </button>
   </div>
 </template>
 
 <style scoped>
 .mode-switch {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-3);
 }
 

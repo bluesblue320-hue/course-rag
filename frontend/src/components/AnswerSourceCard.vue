@@ -10,6 +10,8 @@ defineProps<{
   <details class="source-card" open>
     <summary>
       <strong>[来源{{ source.rank }}]</strong>
+      <span class="file">{{ source.filename }}</span>
+      <span v-if="source.page_number !== null">第 {{ source.page_number }} 页</span>
       <span>相似度：{{ source.score.toFixed(4) }}</span>
       <span>Chunk #{{ source.chunk_index }}</span>
     </summary>
@@ -41,6 +43,12 @@ summary strong {
 summary span {
   color: var(--color-muted);
   font-size: 0.88rem;
+}
+
+summary .file {
+  color: var(--color-text);
+  font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 p {
