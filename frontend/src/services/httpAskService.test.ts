@@ -6,6 +6,9 @@ import { createHttpAskService } from "./httpAskService"
 const validResponse = {
   question: "Service 层负责什么？",
   answer: "Service 层负责核心业务逻辑。[来源1]",
+  answer_status: "answered",
+  max_relevance_score: 0.8421,
+  relevance_threshold: 0.35,
   retrieval_elapsed_ms: 12.4,
   generation_elapsed_ms: 680.7,
   total_elapsed_ms: 693.1,
@@ -78,6 +81,30 @@ describe("createHttpAskService", () => {
     expect(error).toMatchObject({ message, code, httpStatus: status })
   })
 
+  it("maps RAG configuration errors without trusting backend text", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          code: "RAG_NOT_CONFIGURED",
+          message: "secret raw threshold and internal details",
+        },
+        503,
+      ),
+    )
+    const service = createHttpAskService("/api", fetchImpl)
+
+    const error = await service
+      .ask({ question: "问题", top_k: 3 })
+      .catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({
+      message: "问答相关性配置无效，请检查后端 RAG 配置",
+      code: "RAG_NOT_CONFIGURED",
+      httpStatus: 503,
+    })
+    expect(String(error)).not.toContain("secret raw threshold")
+  })
+
   it("maps fetch failures without exposing the underlying error", async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new TypeError("secret endpoint"))
     const service = createHttpAskService("/api", fetchImpl)
@@ -148,5 +175,38 @@ describe("createHttpAskService", () => {
 
     expect(error).toMatchObject({ message: "回答生成失败，请稍后重试" })
     expect(String(error)).not.toContain("abc123")
+  })
+  it("accepts a valid insufficient-context response", async () => {
+    const insufficientResponse = {
+      ...validResponse,
+      answer_status: "insufficient_context",
+      max_relevance_score: null,
+      generation_elapsed_ms: 0,
+    }
+    const service = createHttpAskService(
+      "/api",
+      vi.fn().mockResolvedValue(jsonResponse(insufficientResponse)),
+    )
+
+    await expect(
+      service.ask({ question: "库外问题", top_k: 3 }),
+    ).resolves.toEqual(insufficientResponse)
+  })
+
+  it.each([
+    { answer_status: "unknown" },
+    { max_relevance_score: "0.8" },
+    { relevance_threshold: -0.1 },
+  ])("rejects invalid relevance response fields", async (replacement) => {
+    const service = createHttpAskService(
+      "/api",
+      vi.fn().mockResolvedValue(
+        jsonResponse({ ...validResponse, ...replacement }),
+      ),
+    )
+
+    await expect(
+      service.ask({ question: "问题", top_k: 3 }),
+    ).rejects.toMatchObject({ code: "INVALID_RESPONSE" })
   })
 })

@@ -10,6 +10,9 @@ import { useKnowledgeAsk } from "./useKnowledgeAsk"
 const response: AskResponse = {
   question: "Service 层负责什么？",
   answer: "Service 层负责核心业务逻辑。[来源1]",
+  answer_status: "answered",
+  max_relevance_score: 0.8421,
+  relevance_threshold: 0.35,
   retrieval_elapsed_ms: 12.4,
   generation_elapsed_ms: 680.7,
   total_elapsed_ms: 693.1,

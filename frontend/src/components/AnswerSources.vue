@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import type { AskSource } from "../types/ask"
+import type { AnswerStatus, AskSource } from "../types/ask"
 import AnswerSourceCard from "./AnswerSourceCard.vue"
 
 defineProps<{
   sources: AskSource[]
+  answerStatus: AnswerStatus
 }>()
 </script>
 
 <template>
   <section class="answer-sources" aria-labelledby="sources-heading">
-    <h2 id="sources-heading">引用来源（{{ sources.length }}）</h2>
+    <h2 id="sources-heading">
+      {{ answerStatus === "answered" ? "引用来源" : "检索候选" }}（{{ sources.length }}）
+    </h2>
+    <p v-if="answerStatus === 'insufficient_context'" class="source-note">
+      以下内容是最接近的检索结果，但最高相似度未达到生成阈值，因此未交给 LLM 生成答案。
+    </p>
     <div v-if="sources.length > 0" class="source-list">
       <AnswerSourceCard
         v-for="(source, index) in sources"
@@ -17,7 +23,9 @@ defineProps<{
         :source="source"
       />
     </div>
-    <p v-else class="empty-sources">本次回答没有返回引用来源。</p>
+    <p v-else class="empty-sources">
+      {{ answerStatus === "answered" ? "本次回答没有返回引用来源。" : "没有检索到课程资料候选。" }}
+    </p>
   </section>
 </template>
 
@@ -35,6 +43,14 @@ h2 {
 .source-list {
   display: grid;
   gap: var(--space-3);
+}
+
+.source-note {
+  margin: 0;
+  padding: var(--space-3);
+  border-left: 3px solid var(--color-primary);
+  color: var(--color-muted);
+  background: var(--color-surface-soft);
 }
 
 .empty-sources {
