@@ -6,7 +6,9 @@ env/
 
 # Python caches and build outputs
 __pycache__/
+**pycache**/
 *.py[cod]
+*.pyc
 *.egg-info/
 build/
 dist/
@@ -33,4 +35,6 @@ Thumbs.db
 
 # Frontend dependencies and test output
 node_modules/
+frontend/node_modules/
+frontend/dist/
 coverage/

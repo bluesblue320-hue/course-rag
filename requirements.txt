@@ -3,4 +3,5 @@ pytest
 sentence-transformers
 fastapi
 uvicorn
-httpx
+httpx>=0.27,<1
+python-dotenv>=1,<2
