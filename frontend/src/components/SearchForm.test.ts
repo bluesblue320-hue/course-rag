@@ -4,6 +4,31 @@ import { describe, expect, it } from "vitest"
 import SearchForm from "./SearchForm.vue"
 
 describe("SearchForm", () => {
+  it("shows answer-generation copy in ask mode", () => {
+    const wrapper = mount(SearchForm, { props: { mode: "ask" } })
+
+    expect(wrapper.text()).toContain("向课程知识库提问")
+    expect(wrapper.text()).toContain("按 Enter 生成回答")
+    expect(wrapper.get("button").text()).toBe("生成回答")
+  })
+
+  it("shows retrieval copy in search mode", () => {
+    const wrapper = mount(SearchForm, { props: { mode: "search" } })
+
+    expect(wrapper.text()).toContain("检索课程知识")
+    expect(wrapper.text()).toContain("按 Enter 检索")
+    expect(wrapper.get("button").text()).toBe("开始检索")
+  })
+
+  it("retains input when the mode changes", async () => {
+    const wrapper = mount(SearchForm, { props: { mode: "ask" } })
+    await wrapper.get("textarea").setValue("同一个问题")
+
+    await wrapper.setProps({ mode: "search" })
+
+    expect(wrapper.get("textarea").element.value).toBe("同一个问题")
+  })
+
   it("shows a local validation error for a blank query", async () => {
     const wrapper = mount(SearchForm)
 
@@ -48,7 +73,7 @@ describe("SearchForm", () => {
 
   it("disables both controls while loading", () => {
     const wrapper = mount(SearchForm, {
-      props: { loading: true },
+      props: { mode: "search", loading: true },
     })
 
     expect(wrapper.get("textarea").attributes("disabled")).toBeDefined()

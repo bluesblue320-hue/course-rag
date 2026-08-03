@@ -1,34 +1,92 @@
 <script setup lang="ts">
-import { computed, inject } from "vue"
+import { computed, inject, ref } from "vue"
 
+import AnswerCard from "./components/AnswerCard.vue"
+import AnswerSources from "./components/AnswerSources.vue"
 import AppSidebar from "./components/AppSidebar.vue"
+import AskStatus from "./components/AskStatus.vue"
 import IndexSummary from "./components/IndexSummary.vue"
+import QueryModeSwitch from "./components/QueryModeSwitch.vue"
 import RetrievalExplanation from "./components/RetrievalExplanation.vue"
 import SearchForm from "./components/SearchForm.vue"
 import SearchResults from "./components/SearchResults.vue"
 import SearchStatus from "./components/SearchStatus.vue"
+import { useKnowledgeAsk } from "./composables/useKnowledgeAsk"
 import { useKnowledgeSearch } from "./composables/useKnowledgeSearch"
 import { DEFAULT_INDEX_METADATA } from "./mocks/searchResponses"
+import { askServiceKey } from "./services/askService"
 import { searchServiceKey } from "./services/searchService"
+import type { QueryMode } from "./types/queryMode"
 
 const searchService = inject(searchServiceKey)
 if (!searchService) {
   throw new Error("SearchService 未注入")
 }
+const askService = inject(askServiceKey)
+if (!askService) {
+  throw new Error("AskService 未注入")
+}
 
-const { state, isLoading, search, retry } =
-  useKnowledgeSearch(searchService)
+const mode = ref<QueryMode>("ask")
+const {
+  state: searchState,
+  isLoading: isSearchLoading,
+  search,
+  retry: retrySearch,
+} = useKnowledgeSearch(searchService)
+const {
+  state: askState,
+  isLoading: isAskLoading,
+  ask,
+  retry: retryAsk,
+} = useKnowledgeAsk(askService)
+
+const isBusy = computed(
+  () => isSearchLoading.value || isAskLoading.value,
+)
+
+const pageCopy = computed(() =>
+  mode.value === "ask"
+    ? {
+        eyebrow: "RAG QUESTION ANSWERING",
+        title: "课程知识问答",
+        description: "根据课程资料生成带引用来源的回答。",
+      }
+    : {
+        eyebrow: "SEMANTIC RETRIEVAL",
+        title: "课程知识检索",
+        description: "输入问题，查看语义最相关的课程原文。",
+      },
+)
 
 const responseMetadata = computed(() => {
-  if (state.value.status === "success" || state.value.status === "empty") {
+  if (
+    mode.value === "search" &&
+    (searchState.value.status === "success" ||
+      searchState.value.status === "empty")
+  ) {
     return {
-      indexed_chunks: state.value.response.indexed_chunks,
-      model: state.value.response.model,
+      indexed_chunks: searchState.value.response.indexed_chunks,
+      model: searchState.value.response.model,
       top_k: DEFAULT_INDEX_METADATA.top_k,
+    }
+  }
+  if (mode.value === "ask" && askState.value.status === "success") {
+    return {
+      ...DEFAULT_INDEX_METADATA,
+      model: askState.value.response.embedding_model,
     }
   }
   return DEFAULT_INDEX_METADATA
 })
+
+async function submitQuestion(question: string): Promise<void> {
+  if (mode.value === "ask") {
+    await ask(question)
+    return
+  }
+  await search(question)
+}
 </script>
 
 <template>
@@ -37,14 +95,29 @@ const responseMetadata = computed(() => {
 
     <main>
       <header class="page-header">
-        <p class="eyebrow">SEMANTIC RETRIEVAL</p>
-        <h1>课程知识检索</h1>
-        <p>输入问题，查看语义最相关的课程原文。</p>
+        <p class="eyebrow">{{ pageCopy.eyebrow }}</p>
+        <h1>{{ pageCopy.title }}</h1>
+        <p>{{ pageCopy.description }}</p>
       </header>
 
-      <SearchForm :loading="isLoading" @submit="search" />
-      <SearchStatus :state="state" @retry="retry" />
-      <SearchResults :state="state" />
+      <QueryModeSwitch v-model="mode" :disabled="isBusy" />
+      <SearchForm
+        :mode="mode"
+        :loading="isBusy"
+        @submit="submitQuestion"
+      />
+
+      <template v-if="mode === 'ask'">
+        <AskStatus :state="askState" @retry="retryAsk" />
+        <template v-if="askState.status === 'success'">
+          <AnswerCard :response="askState.response" />
+          <AnswerSources :sources="askState.response.sources" />
+        </template>
+      </template>
+      <template v-else>
+        <SearchStatus :state="searchState" @retry="retrySearch" />
+        <SearchResults :state="searchState" />
+      </template>
     </main>
 
     <aside class="context-panel" aria-label="索引与检索说明">
@@ -124,6 +197,16 @@ main {
 
   .context-panel {
     padding: 0 var(--space-5) var(--space-8);
+  }
+}
+
+@media (max-width: 560px) {
+  main {
+    padding-inline: var(--space-4);
+  }
+
+  .context-panel {
+    padding-inline: var(--space-4);
   }
 }
 </style>
