@@ -55,3 +55,19 @@ class DocumentMetadataError(DocumentError):
 
 class UploadConfigurationError(DocumentError):
     """Raised when MAX_UPLOAD_BYTES is not a positive integer."""
+
+
+class EvaluationError(RagError):
+    """Base exception for the offline evaluation toolkit."""
+
+
+class CorpusValidationError(EvaluationError):
+    """Raised when the evaluation corpus manifest is invalid or unsafe."""
+
+
+class DatasetValidationError(EvaluationError):
+    """Raised when the evaluation dataset is malformed or inconsistent."""
+
+
+class ThresholdConfigurationError(EvaluationError):
+    """Raised when a threshold sweep or weight configuration is invalid."""

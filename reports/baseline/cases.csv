@@ -1,0 +1,61 @@
+﻿case_id,split,category,difficulty,question,answerable,max_relevance_score,first_relevant_rank,hit_at_1,hit_at_3,hit_at_5,recall_at_1,recall_at_3,recall_at_5,reciprocal_rank,predicted_at_comparison_threshold,predicted_at_recommended_threshold,decision_correct_comparison,decision_correct_recommended,top_source_document,top_source_page,top_source_score
+d-001,calibration,direct,easy,Router 层可以直接写业务逻辑吗？,true,0.735598,2,false,true,true,0.0,1.0,1.0,0.5,true,true,true,true,eval-backend,,0.735598
+d-002,calibration,direct,easy,Router 层需要自己写 SQL 访问数据库吗？,true,0.705564,4,false,false,true,0.0,0.0,1.0,0.25,true,true,true,true,eval-backend,,0.705564
+d-003,calibration,direct,easy,Schema 层用什么库来描述请求和响应的数据形状？,true,0.641887,3,false,true,true,0.0,1.0,1.0,0.333333,true,true,true,true,eval-backend,,0.641887
+d-004,calibration,direct,easy,业务逻辑应该写在分层架构的哪一层？,true,0.584814,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-backend,,0.584814
+d-005,calibration,direct,easy,Repository 层的主要职责是什么？,true,0.697249,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-backend,,0.697249
+d-006,calibration,direct,easy,FastAPI 里用什么来声明依赖？,true,0.50084,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-backend,,0.50084
+d-007,calibration,direct,medium,参数校验失败和资源冲突分别应该返回哪个 HTTP 状态码？,true,0.662705,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-backend,,0.662705
+d-008,calibration,direct,easy,RAG 这个缩写指的是什么？,true,0.518091,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-rag,,0.518091
+d-009,calibration,direct,medium,overlap 和 chunk size 之间必须满足什么大小关系？,true,0.565182,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-rag,,0.565182
+d-010,calibration,direct,medium,相关性拒答是依据什么来判断的？,true,0.538879,2,false,true,true,0.0,1.0,1.0,0.5,true,true,true,true,eval-rag,,0.538879
+d-011,calibration,direct,medium,Reranker 处于检索流程的哪个位置？,true,0.570546,2,false,true,true,0.0,1.0,1.0,0.5,true,true,true,true,eval-rag,,0.570546
+d-012,test,direct,easy,数据库主键有哪些约束？,true,0.778736,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-database,,0.778736
+d-013,test,direct,easy,INNER JOIN 会保留哪些行？,true,0.437686,1,true,true,true,1.0,1.0,1.0,1.0,true,false,true,false,eval-database,,0.437686
+d-014,test,direct,medium,索引对读取和写入的性能分别有什么影响？,true,0.535225,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-database,,0.535225
+d-015,test,direct,medium,这个项目现在使用 PostgreSQL 了吗？,true,0.730448,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-database,,0.730448
+p-001,calibration,paraphrase,medium,接口函数里堆满了分支判断和流程编排，这种写法合适吗？,true,0.592437,,false,false,false,0.0,0.0,0.0,0.0,true,true,true,true,eval-backend,,0.592437
+p-002,calibration,paraphrase,medium,请求里的字段类型不对时，还会走到后面的业务代码吗？,true,0.501066,5,false,false,true,0.0,0.0,1.0,0.2,true,true,true,true,eval-backend,,0.501066
+p-003,calibration,paraphrase,medium,为什么建议把入参结构和出参结构拆成两个模型来写？,true,0.503353,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-backend,,0.503353
+p-004,calibration,paraphrase,medium,怎么让业务对象在写测试时不必连真实数据库？,true,0.595059,4,false,false,true,0.0,0.0,1.0,0.25,true,true,true,true,eval-database,,0.595059
+p-005,calibration,paraphrase,medium,为什么不建议在每个接口函数里到处写 try except？,true,0.493217,4,false,false,true,0.0,0.0,1.0,0.25,true,true,true,true,eval-backend,,0.493217
+p-006,calibration,paraphrase,medium,一段文本切得太长会带来什么问题？,true,0.677321,2,false,true,true,0.0,1.0,1.0,0.5,true,true,true,true,eval-rag,,0.677321
+p-007,calibration,paraphrase,medium,换了新的向量模型之后，旧的索引还能接着用吗？,true,0.548764,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-rag,,0.548764
+p-008,calibration,paraphrase,hard,用什么指标衡量正确资料排在结果列表的第几位？,true,0.56953,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-rag,,0.56953
+p-009,calibration,paraphrase,medium,把拒答门槛调得很高会有什么副作用？,true,0.521299,2,false,true,true,0.0,1.0,1.0,0.5,true,true,true,true,eval-rag,,0.521299
+p-010,calibration,paraphrase,medium,一笔转账在中途失败，怎么保证账目不会对不上？,true,0.438538,,false,false,false,0.0,0.0,0.0,0.0,true,false,true,false,eval-rag,,0.438538
+p-011,test,paraphrase,medium,执行删除语句时忘记加条件会发生什么？,true,0.531485,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-database,,0.531485
+p-012,test,paraphrase,medium,一个只有两种取值的状态列，值不值得单独加索引？,true,0.457183,,false,false,false,0.0,0.0,0.0,0.0,true,false,true,false,eval-rag,,0.457183
+p-013,test,paraphrase,medium,为什么不应该把 SQL 直接散落在业务代码里？,true,0.642835,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-database,,0.642835
+p-014,test,paraphrase,medium,为什么 Markdown 文件的检索结果里看不到页码？,true,0.591192,1,true,true,true,1.0,1.0,1.0,1.0,true,true,true,true,eval-rag,,0.591192
+p-015,test,paraphrase,medium,上层对象在构造函数里自己创建下层实现有什么坏处？,true,0.507908,5,false,false,true,0.0,0.0,1.0,0.2,true,true,true,true,eval-backend,,0.507908
+m-001,calibration,multi_evidence,hard,在分层架构里，业务规则和数据访问分别由哪一层负责？,true,0.603143,1,true,true,true,0.5,1.0,1.0,1.0,true,true,true,true,eval-backend,,0.603143
+m-002,calibration,multi_evidence,hard,更换 Embedding 模型时为什么必须重建索引？文档向量和问题向量又有什么要求？,true,0.546778,1,true,true,true,0.5,0.5,1.0,1.0,true,true,true,true,eval-rag,,0.546778
+m-003,calibration,multi_evidence,hard,Top-K 和相似度阈值分别控制检索环节的什么？,true,0.69174,3,false,true,true,0.0,0.5,1.0,0.333333,true,true,true,true,eval-rag,,0.69174
+m-004,calibration,multi_evidence,medium,这个项目目前有没有用上 PostgreSQL 和 pgvector？,true,0.654471,1,true,true,true,0.5,1.0,1.0,1.0,true,true,true,true,eval-database,,0.654471
+m-005,test,multi_evidence,hard,在关系型数据库里，事务和索引分别解决什么问题？,true,0.591974,2,false,true,true,0.0,0.5,0.5,0.5,true,true,true,true,eval-database,,0.591974
+m-006,test,multi_evidence,hard,依赖注入和 HTTP 异常映射分别解决了什么问题？,true,0.730793,1,true,true,true,0.5,0.5,1.0,1.0,true,true,true,true,eval-backend,,0.730793
+of-001,calibration,out_of_scope_far,easy,宫保鸡丁的正宗做法是什么？,false,0.173931,,,,,,,,,false,false,true,true,eval-rag,,0.173931
+of-002,calibration,out_of_scope_far,easy,下一届世界杯决赛安排在哪个城市？,false,0.119809,,,,,,,,,false,false,true,true,eval-rag,,0.119809
+of-003,calibration,out_of_scope_far,easy,北京到上海的高铁二等座票价大概多少？,false,0.34414,,,,,,,,,false,false,true,true,eval-rag,,0.34414
+of-004,calibration,out_of_scope_far,easy,感冒发烧的时候应该吃什么药？,false,0.015581,,,,,,,,,false,false,true,true,eval-database,,0.015581
+of-005,calibration,out_of_scope_far,easy,办理旅游签证需要准备哪些材料？,false,0.130125,,,,,,,,,false,false,true,true,eval-rag,,0.130125
+of-006,calibration,out_of_scope_far,easy,钢琴考级一共分成几个等级？,false,0.348654,,,,,,,,,false,false,true,true,eval-rag,,0.348654
+of-007,calibration,out_of_scope_far,easy,家里养猫需要打哪几种疫苗？,false,0.114717,,,,,,,,,false,false,true,true,eval-database,,0.114717
+of-008,calibration,out_of_scope_far,easy,自由泳换气动作应该怎么练？,false,0.186921,,,,,,,,,false,false,true,true,eval-rag,,0.186921
+of-009,calibration,out_of_scope_far,easy,今年个人所得税的起征点是多少？,false,0.108825,,,,,,,,,false,false,true,true,eval-backend,,0.108825
+of-010,test,out_of_scope_far,easy,有哪些适合小学生阅读的科普读物？,false,0.233662,,,,,,,,,false,false,true,true,eval-rag,,0.233662
+of-011,test,out_of_scope_far,easy,冬天开车有必要换成雪地胎吗？,false,0.09301,,,,,,,,,false,false,true,true,eval-rag,,0.09301
+of-012,test,out_of_scope_far,easy,参加婚礼当伴郎需要准备些什么？,false,0.110898,,,,,,,,,false,false,true,true,eval-rag,,0.110898
+on-001,calibration,out_of_scope_near,hard,本项目使用的 Embedding 模型输出的向量维度是多少？,false,0.587912,,,,,,,,,true,true,false,false,eval-rag,,0.587912
+on-002,calibration,out_of_scope_near,medium,Redis 缓存穿透应该怎么解决？,false,0.348007,,,,,,,,,false,false,true,true,eval-backend,,0.348007
+on-003,calibration,out_of_scope_near,medium,Kubernetes 里 Pod 和 Deployment 有什么区别？,false,0.322456,,,,,,,,,false,false,true,true,eval-backend,,0.322456
+on-004,calibration,out_of_scope_near,medium,gRPC 和 REST 在性能上有什么差别？,false,0.384766,,,,,,,,,true,false,false,true,eval-database,,0.384766
+on-005,calibration,out_of_scope_near,hard,HNSW 向量索引的构建参数应该怎么调？,false,0.463673,,,,,,,,,true,false,false,true,eval-rag,,0.463673
+on-006,calibration,out_of_scope_near,medium,MySQL 的 InnoDB 和 MyISAM 引擎有什么区别？,false,0.419712,,,,,,,,,true,false,false,true,eval-backend,,0.419712
+on-007,calibration,out_of_scope_near,medium,OAuth2 授权码模式的完整流程是什么？,false,0.4347,,,,,,,,,true,false,false,true,eval-backend,,0.4347
+on-008,calibration,out_of_scope_near,hard,LangChain 的 Agent 要怎么配置工具调用？,false,0.306719,,,,,,,,,false,false,true,true,eval-rag,,0.306719
+on-009,test,out_of_scope_near,hard,本项目的 chunk_size 具体设置成了多少？,false,0.541058,,,,,,,,,true,true,false,false,eval-rag,,0.541058
+on-010,test,out_of_scope_near,medium,GPT-4 和 Claude 在中文问答上哪个表现更好？,false,0.435481,,,,,,,,,true,false,false,true,eval-rag,,0.435481
+on-011,test,out_of_scope_near,hard,Elasticsearch 的 BM25 打分公式是怎么算的？,false,0.374028,,,,,,,,,true,false,false,true,eval-rag,,0.374028
+on-012,test,out_of_scope_near,medium,数据库连接池的最大连接数应该设成多少？,false,0.47578,,,,,,,,,true,false,false,true,eval-database,,0.47578

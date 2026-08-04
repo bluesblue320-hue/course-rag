@@ -13,6 +13,7 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+.pytest-temproot/
 .coverage
 htmlcov/
 
@@ -41,3 +42,6 @@ coverage/
 
 # Runtime document uploads and metadata
 data/runtime/
+
+# Ad-hoc evaluation output; committed baselines live in reports/baseline/
+reports/generated/

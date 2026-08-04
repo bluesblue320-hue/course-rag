@@ -34,10 +34,13 @@
 - 上传文件使用 UUID 存储名，运行时数据目录不进入 Git
 - 支持上传大小限制 `MAX_UPLOAD_BYTES`，默认 10 MB
 - 通过 Vue 3 页面提供“知识库管理”模式，支持上传、列表和删除文档
+- 提供离线检索与拒答评估基准：受控语料、60 题标注数据集和可复现的评估脚本
+- 通过 `python -m scripts.evaluate_rag` 输出 Hit@K、Recall@K、MRR 与回答/拒答混淆矩阵
+- 在 calibration split 上扫描相似度阈值并给出确定性的推荐值，不自动改写生产配置
 
 ## 当前没有实现
 
-本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、数据库、向量数据库、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、Reranker、BM25、混合检索或自动评估。本地 JSON 和文件系统只是当前实现，不代表生产级存储方案。
+本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、数据库、向量数据库、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、Reranker、BM25 或混合检索。评估只覆盖检索质量与拒答决策，不评估生成答案的质量，也不评估答案忠实度。本地 JSON 和文件系统只是当前实现，不代表生产级存储方案。
 
 ## 项目目录
 
@@ -64,7 +67,18 @@ course-rag/
 │   ├── generation.py         # 调用 OpenAI-compatible LLM
 │   ├── rag_service.py        # 编排完整 RAG 调用链
 │   ├── exceptions.py         # RAG 与文档领域异常
+│   ├── evaluation/           # 离线评估库（数据集、语料、指标、阈值、报告）
 │   └── main.py               # 命令行入口
+├── eval/                     # 评估基准：受控语料、清单与标注数据集
+│   ├── README.md             # 评估设计、指标定义与使用说明
+│   ├── corpus_manifest.json  # 语料清单
+│   ├── corpus/               # 3 份原创 Markdown 语料
+│   └── dataset.jsonl         # 60 道带标注问题
+├── scripts/
+│   └── evaluate_rag.py       # 评估命令行入口
+├── reports/
+│   ├── baseline/             # 已提交的基线报告快照
+│   └── generated/            # 本地评估输出（不进入 Git）
 ├── tests/                    # 离线单元测试
 ├── frontend/                 # Vue 3 + Vite + TypeScript 前端
 │   ├── src/services/         # Search/Ask/Document HTTP 服务与可选模拟服务
@@ -275,6 +289,33 @@ npm.cmd run type-check
 npm.cmd run build
 ```
 
+## 离线评估
+
+`eval/` 是一份离线评估基准：3 份受控语料、60 道带标注问题，用来回答四个问题——正确证据有没有进入 Top-K、资料内问题有多少被错误拒答、资料外问题有多少被错误放行、仓库默认对比阈值 0.35 在这份受控基准上是否合理。
+
+```powershell
+python -m scripts.evaluate_rag
+```
+
+报告写入 `reports/generated/`：`summary.json`（机器可读，用于回归对比）、`cases.csv`（每题明细，Excel 可直接打开）、`report.md`（人读报告）。已提交的基线快照在 `reports/baseline/`。
+
+评估复用生产管线（`DocumentLoader` → `chunk_document` → `EmbeddingService` → `KnowledgeIndex`），并复用生产的拒答判定函数 `has_sufficient_context`，因此评估结论不会和线上行为漂移。评估**不调用 LLM**。
+
+当前基线（`paraphrase-multilingual-MiniLM-L12-v2`，chunk 300/50，Top-5）：
+
+| 指标 | 值 |
+| --- | ---: |
+| Hit@1 / Hit@3 / Hit@5 | 0.5556 / 0.7778 / 0.9167 |
+| MRR | 0.6894 |
+| test 决策准确率 @ 0.35（仓库默认对比值） | 0.7778 |
+| test 错误放行率 @ 0.35 | 0.5714 |
+| 推荐阈值（仅由 calibration split 决定） | 0.49 |
+| test 决策准确率 @ 0.49 | 0.8333 |
+
+推荐阈值**不会**自动写入生产配置，是否采纳是独立决策。指标定义、标注规则、阈值权重的业务取舍和已知限制都写在 [`eval/README.md`](eval/README.md)。
+
+补充两点：`0.35` 只是仓库代码里的拒答默认值，仅作报告对比基准，不一定等于部署环境实际生效的阈值（部署值可能由 `RAG_MIN_RELEVANCE_SCORE` 覆盖）；test split 的结果已随本仓库公开，之后更适合作为回归基准，不再是未来完全未见的最终 holdout，正式横评需要另取一个新留出集。
+
 ## 示例问题
 
 - 业务逻辑应该写在哪一层？
@@ -348,4 +389,4 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 ## 当前范围之外
 
-当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、数据库、向量数据库、pgvector、对象存储、用户登录与多用户隔离、后台任务队列、评估集、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。本地 JSON 与文件系统只是当前阶段的存储实现，没有声称支持生产级并发和扩展。
+当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新，另有一份离线的检索与拒答评估基准。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、数据库、向量数据库、pgvector、对象存储、用户登录与多用户隔离、后台任务队列、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。评估只覆盖检索质量与拒答决策，生成答案质量与答案忠实度的评估也未实现。本地 JSON 与文件系统只是当前阶段的存储实现，没有声称支持生产级并发和扩展。

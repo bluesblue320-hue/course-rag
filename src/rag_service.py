@@ -13,6 +13,7 @@ INSUFFICIENT_CONTEXT_ANSWER = (
     "或切换到语义检索查看最接近的课程原文。"
 )
 _THRESHOLD_ERROR = "RAG_MIN_RELEVANCE_SCORE 必须是 0 到 1 之间的有限数字"
+_MAX_SCORE_ERROR = "检索结果的最高相关性分数无效"
 
 
 def _validate_min_relevance_score(value: object) -> float:
@@ -22,6 +23,28 @@ def _validate_min_relevance_score(value: object) -> float:
     if not math.isfinite(threshold) or not 0 <= threshold <= 1:
         raise RagConfigurationError(_THRESHOLD_ERROR)
     return threshold
+
+
+def has_sufficient_context(
+    max_relevance_score: float | None,
+    threshold: float,
+) -> bool:
+    """Decide whether the best retrieval score supports generating an answer.
+
+    This is the single source of truth for the answer/refuse boundary so the
+    offline evaluation tooling cannot drift away from production behaviour.
+    A missing score means no usable retrieval result, which always refuses.
+    """
+    if max_relevance_score is None:
+        return False
+    if isinstance(max_relevance_score, bool) or not isinstance(
+        max_relevance_score, (int, float)
+    ):
+        raise ValueError(_MAX_SCORE_ERROR)
+    score = float(max_relevance_score)
+    if not math.isfinite(score):
+        raise ValueError(_MAX_SCORE_ERROR)
+    return score >= _validate_min_relevance_score(threshold)
 
 
 def resolve_min_relevance_score(explicit_value: object | None = None) -> float:
@@ -69,10 +92,10 @@ class RagService:
             return None
         score = sources[0].get("score")
         if isinstance(score, bool) or not isinstance(score, (int, float)):
-            raise ValueError("检索结果的最高相关性分数无效")
+            raise ValueError(_MAX_SCORE_ERROR)
         parsed_score = float(score)
         if not math.isfinite(parsed_score) or not -1 <= parsed_score <= 1:
-            raise ValueError("检索结果的最高相关性分数无效")
+            raise ValueError(_MAX_SCORE_ERROR)
         return parsed_score
 
     def answer(
@@ -93,9 +116,9 @@ class RagService:
         retrieval_finished_at = perf_counter()
 
         max_relevance_score = self._get_max_relevance_score(sources)
-        if (
-            max_relevance_score is None
-            or max_relevance_score < self._min_relevance_score
+        if not has_sufficient_context(
+            max_relevance_score,
+            self._min_relevance_score,
         ):
             retrieval_elapsed_ms = round(
                 (retrieval_finished_at - retrieval_started_at) * 1000,
