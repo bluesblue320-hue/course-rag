@@ -132,6 +132,9 @@ def test_app_builds_index_once_and_health_reports_chunk_count(
         "generation_ready": True,
         "rag_ready": True,
         "min_relevance_score": 0.35,
+        "reranker_enabled": False,
+        "reranker_ready": False,
+        "reranker_model": None,
     }
     assert second_response.status_code == 200
     assert FakeEmbeddingService.init_count == 1
@@ -193,6 +196,9 @@ def test_app_starts_without_llm_and_keeps_retrieval_available(
         "generation_ready": False,
         "rag_ready": False,
         "min_relevance_score": None,
+        "reranker_enabled": False,
+        "reranker_ready": False,
+        "reranker_model": None,
     }
     assert search_response.status_code == 200
     assert ask_response.status_code == 503
@@ -363,6 +369,9 @@ def test_search_uses_default_top_k_and_returns_typed_results(
         "document_id": "builtin-knowledge",
         "filename": "knowledge.txt",
         "page_number": None,
+        "retrieval_rank": None,
+        "rerank_score": None,
+        "reranker_applied": False,
     }
     assert FakeEmbeddingService.queries == ["业务逻辑应该写在哪里？"]
 
@@ -437,6 +446,9 @@ def test_ask_returns_answer_sources_timings_and_model_names(
         "document_id": "builtin-knowledge",
         "filename": "knowledge.txt",
         "page_number": None,
+        "retrieval_rank": None,
+        "rerank_score": None,
+        "reranker_applied": False,
     }
     assert body["retrieval_elapsed_ms"] == 10.5
     assert body["generation_elapsed_ms"] == 720.2
@@ -458,6 +470,9 @@ def test_ask_returns_structured_insufficient_context_without_generation(
         "document_id": "builtin-knowledge",
         "filename": "knowledge.txt",
         "page_number": None,
+        "retrieval_rank": None,
+        "rerank_score": None,
+        "reranker_applied": False,
     }
 
     class LowScoreRetriever:
@@ -591,6 +606,9 @@ def test_invalid_rag_configuration_keeps_search_available_and_closes_generation(
             "generation_ready": True,
             "rag_ready": False,
             "min_relevance_score": None,
+            "reranker_enabled": False,
+            "reranker_ready": False,
+            "reranker_model": None,
         }
         assert search_response.status_code == 200
         assert ask_response.status_code == 503

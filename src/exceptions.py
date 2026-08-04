@@ -71,3 +71,11 @@ class DatasetValidationError(EvaluationError):
 
 class ThresholdConfigurationError(EvaluationError):
     """Raised when a threshold sweep or weight configuration is invalid."""
+
+
+class RerankerConfigurationError(RagError):
+    """Raised when reranker configuration is invalid but non-fatal."""
+
+
+class RerankerUnavailableError(RagError):
+    """Raised when a reranker cannot be loaded or called."""

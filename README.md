@@ -316,6 +316,36 @@ python -m scripts.evaluate_rag
 
 补充两点：`0.35` 只是仓库代码里的拒答默认值，仅作报告对比基准，不一定等于部署环境实际生效的阈值（部署值可能由 `RAG_MIN_RELEVANCE_SCORE` 覆盖）；test split 的结果已随本仓库公开，之后更适合作为回归基准，不再是未来完全未见的最终 holdout，正式横评需要另取一个新留出集。
 
+## 可选 Reranker
+
+系统支持可选的两阶段检索（向量候选池 + CrossEncoder Reranker）。Reranker 默认关闭，启用时在向量检索之后对更大候选池（默认 Top-15）进行精排，返回最终 Top-K。
+
+**配置**（`.env`）：
+
+```env
+RAG_RERANKER_ENABLED=false
+RAG_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+RAG_RERANKER_CANDIDATE_TOP_K=15
+```
+
+- `RAG_RERANKER_ENABLED=false` 时行为与原来完全一致，不加载额外模型
+- 拒答决策仍基于 `retrieval_score`（向量相似度），不使用 `rerank_score`
+- Reranker 失败时安全回退到原始向量排序
+
+**A/B 评估**：
+
+```powershell
+python -m scripts.evaluate_reranker `
+  --manifest eval/corpus_manifest.json `
+  --dataset eval/dataset.jsonl `
+  --candidate-top-k 15 `
+  --final-top-k 5 `
+  --reranker-model "cross-encoder/ms-marco-MiniLM-L-6-v2" `
+  --output-dir reports/generated/reranking
+```
+
+报告对比 vector-only 与 reranked 两种模式的 Hit@K、Recall@K、MRR，并按 category / difficulty / split 分组。详见 [`docs/reranking.md`](docs/reranking.md)。
+
 ## 示例问题
 
 - 业务逻辑应该写在哪一层？

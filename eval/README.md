@@ -288,3 +288,28 @@ python -m scripts.evaluate_rag --output-dir reports/generated
 ```bash
 pytest tests/test_evaluation_*.py -q
 ```
+
+---
+
+## Reranker A/B 评估
+
+`scripts/evaluate_reranker.py` 对 vector-only 与 reranked 两种检索模式进行 A/B 对比。
+它复用相同的候选池（Top-15 向量检索），一次 Query Embedding + 一次向量检索，分支为：
+
+- **Vector-only**：候选池前 5 个
+- **Reranked**：候选池经 CrossEncoder 重排后取前 5 个
+
+```bash
+python -m scripts.evaluate_reranker \
+  --manifest eval/corpus_manifest.json \
+  --dataset eval/dataset.jsonl \
+  --candidate-top-k 15 \
+  --final-top-k 5 \
+  --reranker-model "cross-encoder/ms-marco-MiniLM-L-6-v2" \
+  --output-dir reports/generated/reranking
+```
+
+报告包含 Candidate Hit@5/10/15、Vector/Reranked Hit@1/3/5 + MRR、差值、按 category/difficulty/split 分组、
+重点 paraphrase 对比、p-001/p-010/p-012 跟踪、改善/退化案例、拒答决策一致性检查、推荐建议。
+
+详见 [`docs/reranking.md`](../docs/reranking.md)。

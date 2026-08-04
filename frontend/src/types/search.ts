@@ -11,6 +11,12 @@ export interface SearchResult {
   document_id: string
   filename: string
   page_number: number | null
+  /** Original vector retrieval rank (before optional reranking). */
+  retrieval_rank?: number | null
+  /** Second-stage reranker score (null when reranker not applied). */
+  rerank_score?: number | null
+  /** Whether the reranker was applied to this result. */
+  reranker_applied?: boolean
 }
 
 export interface SearchResponse {

@@ -47,6 +47,11 @@ from src.rag_service import (
     RagService,
     resolve_min_relevance_score,
 )
+from src.reranker import (
+    RerankerConfig,
+    resolve_reranker_config,
+)
+from src.retrieval_service import RetrievalService, build_reranker
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_PATH = PROJECT_ROOT / "data" / "knowledge.txt"
@@ -139,6 +144,36 @@ def initialize_search(app: FastAPI) -> None:
     app.state.model_name = embedding_service.model_name
     app.state.retrieval_ready = True
 
+    # Build optional reranker (disabled by default; safe degradation on failure)
+    reranker_config: RerankerConfig | None = None
+    reranker_instance = None
+    retrieval_service: RetrievalService | None = None
+    reranker_enabled = False
+    reranker_ready = False
+    reranker_model_name: str | None = None
+    try:
+        reranker_config = resolve_reranker_config(final_top_k=3)
+        if reranker_config.enabled:
+            reranker_instance = build_reranker(reranker_config)
+            retrieval_service = RetrievalService(
+                retriever=index,
+                config=reranker_config,
+                reranker=reranker_instance,
+            )
+            reranker_enabled = True
+            reranker_ready = retrieval_service.reranker_ready
+            reranker_model_name = retrieval_service.reranker_model
+    except Exception:
+        # Reranker config or model load failed; proceed without it.
+        reranker_config = None
+        reranker_instance = None
+        retrieval_service = None
+
+    app.state.retrieval_service = retrieval_service
+    app.state.reranker_enabled = reranker_enabled
+    app.state.reranker_ready = reranker_ready
+    app.state.reranker_model = reranker_model_name
+
     app.state.generation_service = None
     app.state.rag_service = None
     app.state.llm_model_name = None
@@ -164,6 +199,7 @@ def initialize_search(app: FastAPI) -> None:
                 prompt_builder=PromptBuilder(),
                 generation_service=generation_service,
                 min_relevance_score=min_relevance_score,
+                retrieval_service=retrieval_service,
             )
         except RagConfigurationError as exc:
             app.state.rag_configuration_error = exc
@@ -198,6 +234,9 @@ class HealthResponse(BaseModel):
     generation_ready: bool
     rag_ready: bool
     min_relevance_score: float | None
+    reranker_enabled: bool = False
+    reranker_ready: bool = False
+    reranker_model: str | None = None
 
 
 class SearchRequest(BaseModel):
@@ -226,6 +265,9 @@ class SearchResultResponse(BaseModel):
     document_id: str
     filename: str
     page_number: int | None
+    retrieval_rank: int | None = None
+    rerank_score: float | None = None
+    reranker_applied: bool = False
 
 
 class SearchResponse(BaseModel):
@@ -266,6 +308,9 @@ class AskSourceResponse(BaseModel):
     document_id: str
     filename: str
     page_number: int | None
+    retrieval_rank: int | None = None
+    rerank_score: float | None = None
+    reranker_applied: bool = False
 
 
 class AskResponse(BaseModel):
@@ -511,6 +556,9 @@ def health(request: Request) -> HealthResponse:
         generation_ready=request.app.state.generation_ready,
         rag_ready=request.app.state.rag_ready,
         min_relevance_score=request.app.state.min_relevance_score,
+        reranker_enabled=getattr(request.app.state, "reranker_enabled", False),
+        reranker_ready=getattr(request.app.state, "reranker_ready", False),
+        reranker_model=getattr(request.app.state, "reranker_model", None),
     )
 
 
@@ -521,10 +569,33 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
     query_embedding = request.app.state.embedding_service.encode_query(
         payload.query
     )
-    results = request.app.state.knowledge_index.search(
-        query_embedding,
-        top_k=payload.top_k,
-    )
+    retrieval_service = getattr(request.app.state, "retrieval_service", None)
+    if retrieval_service is not None:
+        outcome = retrieval_service.retrieve(
+            query_embedding,
+            payload.query,
+            final_top_k=payload.top_k,
+        )
+        results = [
+            {
+                "rank": chunk.final_rank,
+                "score": chunk.retrieval_score,
+                "text": chunk.text,
+                "chunk_index": chunk.chunk_index,
+                "document_id": chunk.document_id,
+                "filename": chunk.filename,
+                "page_number": chunk.page_number,
+                "retrieval_rank": chunk.retrieval_rank,
+                "rerank_score": chunk.rerank_score,
+                "reranker_applied": outcome.reranker_applied,
+            }
+            for chunk in outcome.sources
+        ]
+    else:
+        results = request.app.state.knowledge_index.search(
+            query_embedding,
+            top_k=payload.top_k,
+        )
     elapsed_ms = round((perf_counter() - started_at) * 1000, 2)
     return SearchResponse(
         query=payload.query,
