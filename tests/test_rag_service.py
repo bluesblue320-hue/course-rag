@@ -9,6 +9,7 @@ from src.rag_service import (
     DEFAULT_MIN_RELEVANCE_SCORE,
     INSUFFICIENT_CONTEXT_ANSWER,
     RagService,
+    has_sufficient_context,
     resolve_min_relevance_score,
 )
 
@@ -309,3 +310,34 @@ def test_constructor_rejects_invalid_threshold(value: object) -> None:
 def test_explicit_bool_threshold_is_rejected(value: bool) -> None:
     with pytest.raises(RagConfigurationError):
         resolve_min_relevance_score(value)
+
+
+def test_has_sufficient_context_answers_at_threshold_boundary() -> None:
+    assert has_sufficient_context(0.35, 0.35) is True
+    assert has_sufficient_context(0.3500001, 0.35) is True
+
+
+def test_has_sufficient_context_refuses_below_threshold() -> None:
+    assert has_sufficient_context(0.3499, 0.35) is False
+
+
+def test_has_sufficient_context_refuses_missing_score() -> None:
+    assert has_sufficient_context(None, 0.35) is False
+
+
+def test_has_sufficient_context_refuses_non_finite_scores() -> None:
+    assert has_sufficient_context(float("nan"), 0.35) is False
+    assert has_sufficient_context(float("inf"), 0.35) is False
+    assert has_sufficient_context(float("-inf"), 0.35) is False
+
+
+def test_has_sufficient_context_matches_production_answer_behavior() -> None:
+    service, _, _, prompt_builder, generation, _ = make_pipeline(
+        sources=[{"rank": 1, "score": 0.6, "text": "资料", "chunk_index": 0}]
+    )
+
+    result = service.answer("课程问题")
+
+    assert result["answer_status"] == "answered"
+    assert prompt_builder.requests
+    assert generation.prompts == ["built prompt"]

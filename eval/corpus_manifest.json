@@ -1,0 +1,22 @@
+{
+  "documents": [
+    {
+      "document_id": "eval-backend",
+      "path": "eval/corpus/backend-architecture.md",
+      "filename": "backend-architecture.md",
+      "content_type": "text/markdown"
+    },
+    {
+      "document_id": "eval-rag",
+      "path": "eval/corpus/rag-fundamentals.md",
+      "filename": "rag-fundamentals.md",
+      "content_type": "text/markdown"
+    },
+    {
+      "document_id": "eval-database",
+      "path": "eval/corpus/database-basics.md",
+      "filename": "database-basics.md",
+      "content_type": "text/markdown"
+    }
+  ]
+}

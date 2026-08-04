@@ -40,6 +40,23 @@ def resolve_min_relevance_score(explicit_value: object | None = None) -> float:
     return _validate_min_relevance_score(parsed_value)
 
 
+def has_sufficient_context(
+    max_score: float | None,
+    threshold: float,
+) -> bool:
+    """Decide whether the best retrieval score supports answer generation.
+
+    The boundary matches production behavior: a score equal to the threshold
+    is sufficient, while a missing or non-finite score is never sufficient.
+    """
+    if max_score is None:
+        return False
+    parsed_score = float(max_score)
+    if not math.isfinite(parsed_score):
+        return False
+    return parsed_score >= threshold
+
+
 class RagService:
     """Connect injected RAG components without creating their dependencies."""
 
@@ -93,9 +110,9 @@ class RagService:
         retrieval_finished_at = perf_counter()
 
         max_relevance_score = self._get_max_relevance_score(sources)
-        if (
-            max_relevance_score is None
-            or max_relevance_score < self._min_relevance_score
+        if not has_sufficient_context(
+            max_relevance_score,
+            self._min_relevance_score,
         ):
             retrieval_elapsed_ms = round(
                 (retrieval_finished_at - retrieval_started_at) * 1000,

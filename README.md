@@ -64,7 +64,14 @@ course-rag/
 │   ├── generation.py         # 调用 OpenAI-compatible LLM
 │   ├── rag_service.py        # 编排完整 RAG 调用链
 │   ├── exceptions.py         # RAG 与文档领域异常
+│   ├── evaluation/           # 离线评估：数据集/语料/匹配/指标/阈值/运行/报告
 │   └── main.py               # 命令行入口
+├── scripts/
+│   └── evaluate_rag.py       # 评估与阈值校准 CLI
+├── eval/                     # 评估语料、清单与数据集（含 README）
+├── reports/
+│   ├── rag-evaluation-baseline.md / .json   # 正式基线快照
+│   └── generated/            # 每次运行生成的明细（不进入 Git）
 ├── tests/                    # 离线单元测试
 ├── frontend/                 # Vue 3 + Vite + TypeScript 前端
 │   ├── src/services/         # Search/Ask/Document HTTP 服务与可选模拟服务
@@ -306,6 +313,33 @@ Top K 来源（rank/score/text/chunk_index/document_id/filename/page_number）
 
 上传和删除都在内存中完整构建新索引，全部验证成功后一次性替换当前索引；解析、Embedding、元数据写入或索引构建任何一步失败，旧索引和原文档列表继续可用。Vue 前端通过模式切换分别使用 `/ask`、`/search` 和 `/documents` 三个分支；问答和检索模式共用问题输入，知识库管理独立保留自己的状态。
 
+## RAG 离线评估
+
+项目附带一套可重复运行的离线评估（`eval/` + `src/evaluation/`），用数据衡量检索质量、拒答决策和相关性阈值：
+
+- **检索评估**：Hit@K、Recall@K、MRR，只衡量证据是否被检索到，不评估生成答案。
+- **拒答决策评估**：混淆矩阵（TP/FN/TN/FP）、错误放行率、错误拒答率、回答率/拒答率。
+- **阈值校准**：在 calibration 拆分上扫描阈值（默认 0.20–0.60、步长 0.01），用加权成本选择推荐阈值，再在独立的 test 拆分上验证一次。
+
+Calibration 用于选阈值，Test 只做最终验证，两者题目不重复。评估复用生产代码（Loader → chunk_document → EmbeddingService → KnowledgeIndex），不调用 LLM，不写入运行时数据目录。默认权重为错误放行 3、错误拒答 1，这是本项目的业务选择，不是通用行业标准。推荐阈值不会自动写入生产配置。
+
+运行：
+
+```powershell
+python -m scripts.evaluate_rag `
+  --manifest eval/corpus_manifest.json `
+  --dataset eval/dataset.jsonl `
+  --top-k 5 `
+  --threshold-start 0.20 `
+  --threshold-end 0.60 `
+  --threshold-step 0.01 `
+  --false-answer-weight 3 `
+  --false-refusal-weight 1 `
+  --output-dir reports/generated/rag-evaluation
+```
+
+输出：`summary.json`（标准 JSON，无 NaN）、`cases.csv`（UTF-8 BOM）、`report.md`。正式基线快照见 `reports/rag-evaluation-baseline.md`；`reports/generated/` 已加入 `.gitignore`。数据集结构、指标定义和如何新增题目的说明见 `eval/README.md`。
+
 ## 四个核心概念
 
 ### Chunk
@@ -348,4 +382,4 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 ## 当前范围之外
 
-当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、数据库、向量数据库、pgvector、对象存储、用户登录与多用户隔离、后台任务队列、评估集、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。本地 JSON 与文件系统只是当前阶段的存储实现，没有声称支持生产级并发和扩展。
+当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新，并附带离线检索/拒答评估与阈值校准。评估不包含生成答案质量评分、LLM-as-a-Judge、答案忠实度评分、Reranker、BM25、混合检索、pgvector、自动 CI、评估前端页面，也不会自动修改生产阈值。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、数据库、向量数据库、pgvector、对象存储、用户登录与多用户隔离、后台任务队列、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。本地 JSON 与文件系统只是当前阶段的存储实现，没有声称支持生产级并发和扩展。

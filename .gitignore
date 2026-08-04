@@ -41,3 +41,6 @@ coverage/
 
 # Runtime document uploads and metadata
 data/runtime/
+
+# Generated evaluation artifacts
+reports/generated/
