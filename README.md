@@ -214,6 +214,10 @@ curl.exe -X POST http://127.0.0.1:8000/ask `
 
 文件校验同时使用扩展名、Content-Type 和解析结果，实际磁盘文件名由 UUID 生成，原始文件名只用于展示，不会用于拼接保存路径。上传文件保存在 `data/runtime/uploads/`，元数据保存在 `data/runtime/documents.json`，该目录已加入 `.gitignore`，不会进入 Git。LLM 未配置或相关性阈值无效时，文档上传和语义检索仍可正常使用。
 
+上传端点最多把 `MAX_UPLOAD_BYTES + 1` 字节读入内存，超过限制立即返回 413，不依赖客户端提供的 Content-Length。持久化的 `stored_filename` 在读取元数据时按 UUID 文件名格式校验（32 位十六进制 + `.txt`/`.md`/`.pdf`），路径解析被限制在上传目录内，非法记录不会被读取或删除到目录之外。
+
+应用启动时会验证持久化上传记录：缺失、损坏或无法解析的上传记录不会进入活动索引，也不会继续显示为已就绪文档；无效元数据会被原子清理（相关无效文件按 best-effort 删除，失败不影响启动）。`documents.json` 自身损坏仍会明确报错。Embedding、索引构建等意外内部错误统一返回稳定的 `500 DOCUMENT_INGESTION_FAILED`，不会泄露内部异常或服务器路径。
+
 ### 缺少 LLM 配置时
 
 LLM 未配置不会阻止 FastAPI 启动。只要检索依赖初始化成功，接口行为如下：

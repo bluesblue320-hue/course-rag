@@ -192,7 +192,7 @@ def test_embedding_failure_keeps_old_index_and_cleans_file(
     embedding.fail_documents = True
     before_chunks = service.index.chunk_count
 
-    with pytest.raises(RuntimeError, match="embedding failed"):
+    with pytest.raises(DocumentIngestionError, match="文档处理失败"):
         service.ingest("notes.txt", "text/plain", "alpha 内容".encode())
 
     assert service.index.chunk_count == before_chunks
@@ -339,7 +339,7 @@ def test_delete_rebuild_failure_keeps_document_and_index(
     record = service.ingest("notes.txt", "text/plain", "alpha 内容".encode())
     embedding.fail_documents = True
 
-    with pytest.raises(RuntimeError, match="embedding failed"):
+    with pytest.raises(DocumentIngestionError, match="文档处理失败"):
         service.delete_document(record.document_id)
 
     embedding.fail_documents = False
@@ -393,3 +393,220 @@ def test_document_ids_are_unique_across_uploads(tmp_path: Path) -> None:
     second = service.ingest("b.txt", "text/plain", "alpha 二".encode())
 
     assert first.document_id != second.document_id
+
+
+def _stored_name(seed: str, suffix: str = "txt") -> str:
+    hex_slug = "".join(
+        character for character in seed if character in "0123456789abcdef"
+    )
+    return f"{hex_slug}{'a' * (32 - len(hex_slug))}.{suffix}"
+
+
+def _upload_record(
+    document_id: str,
+    stored_filename: str,
+    *,
+    is_builtin: bool = False,
+    content_type: str = "text/plain",
+) -> DocumentRecord:
+    return DocumentRecord(
+        document_id=document_id,
+        original_filename=f"{document_id}.txt",
+        stored_filename=None if is_builtin else stored_filename,
+        content_type=content_type,
+        size_bytes=10,
+        text_length=10,
+        chunk_count=1,
+        created_at=utc_now_iso(),
+        is_builtin=is_builtin,
+    )
+
+
+def test_reconcile_removes_missing_file_record(tmp_path: Path) -> None:
+    service, _embedding, _upload_dir = _make_service(tmp_path)
+    ghost = _upload_record("doc-ghost", _stored_name("ghost"))
+    service._repository.save_documents([ghost])
+
+    valid = service.reconcile_persisted_documents()
+
+    assert valid == []
+    assert service._repository.list_documents() == []
+
+
+def test_reconcile_removes_corrupt_pdf_and_deletes_file(tmp_path: Path) -> None:
+    service, _embedding, upload_dir = _make_service(tmp_path)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    corrupt_name = _stored_name("corrupt", "pdf")
+    (upload_dir / corrupt_name).write_bytes(b"not a real pdf")
+    service._repository.save_documents(
+        [
+            _upload_record(
+                "doc-corrupt",
+                corrupt_name,
+                content_type="application/pdf",
+            )
+        ]
+    )
+
+    valid = service.reconcile_persisted_documents()
+
+    assert valid == []
+    assert not (upload_dir / corrupt_name).exists()
+    assert service._repository.list_documents() == []
+
+
+def test_reconcile_removes_empty_file_record(tmp_path: Path) -> None:
+    service, _embedding, upload_dir = _make_service(tmp_path)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    empty_name = _stored_name("empty")
+    (upload_dir / empty_name).write_bytes(b"")
+    service._repository.save_documents(
+        [_upload_record("doc-empty", empty_name)]
+    )
+
+    valid = service.reconcile_persisted_documents()
+
+    assert valid == []
+    assert service._repository.list_documents() == []
+
+
+def test_reconcile_keeps_valid_uploads_and_repository(tmp_path: Path) -> None:
+    service, _embedding, upload_dir = _make_service(tmp_path)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    valid_name = _stored_name("valid")
+    (upload_dir / valid_name).write_text("alpha 有效内容", encoding="utf-8")
+    record = _upload_record("doc-valid", valid_name)
+    service._repository.save_documents([record])
+
+    valid = service.reconcile_persisted_documents()
+
+    assert valid == [record]
+    assert service._repository.list_documents() == [record]
+
+
+def test_reconcile_cleans_builtin_records_from_repository(tmp_path: Path) -> None:
+    service, _embedding, _upload_dir = _make_service(tmp_path)
+    builtin_record = _upload_record(BUILTIN_ID, "", is_builtin=True)
+    service._repository.save_documents([builtin_record])
+
+    valid = service.reconcile_persisted_documents()
+
+    assert valid == []
+    assert service._repository.list_documents() == []
+    assert service.list_documents() == [_builtin_document()]
+
+
+def test_reconcile_propagates_corrupted_json(tmp_path: Path) -> None:
+    service, _embedding, _upload_dir = _make_service(tmp_path)
+    service._repository._json_path.parent.mkdir(parents=True, exist_ok=True)
+    service._repository._json_path.write_text("{ broken json", encoding="utf-8")
+
+    with pytest.raises(DocumentMetadataError):
+        service.reconcile_persisted_documents()
+
+
+def test_reconcile_delete_failure_does_not_break_valid_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _embedding, upload_dir = _make_service(tmp_path)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    corrupt_name = _stored_name("corrupt", "pdf")
+    (upload_dir / corrupt_name).write_bytes(b"not a real pdf")
+    valid_name = _stored_name("valid")
+    (upload_dir / valid_name).write_text("alpha 有效内容", encoding="utf-8")
+    valid_record = _upload_record("doc-valid", valid_name)
+    service._repository.save_documents(
+        [
+            _upload_record(
+                "doc-corrupt",
+                corrupt_name,
+                content_type="application/pdf",
+            ),
+            valid_record,
+        ]
+    )
+
+    def fail_unlink(_path: Path) -> None:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "unlink", fail_unlink)
+
+    valid = service.reconcile_persisted_documents()
+
+    monkeypatch.setattr(Path, "unlink", Path.unlink)
+    assert valid == [valid_record]
+    assert service._repository.list_documents() == [valid_record]
+    assert (upload_dir / corrupt_name).exists()
+
+
+@pytest.mark.parametrize(
+    "dangerous",
+    [
+        "../../escape.txt",
+        "../escape.txt",
+        "nested/file.txt",
+        "..\\escape.txt",
+        "..\\..\\escape.txt",
+        "C:/absolute/escape.txt",
+        "/absolute/escape.txt",
+    ],
+)
+def test_resolve_stored_path_rejects_dangerous_names(
+    tmp_path: Path,
+    dangerous: str,
+) -> None:
+    service, _embedding, _upload_dir = _make_service(tmp_path)
+    sentinel = tmp_path / "escape.txt"
+    sentinel.write_text("sentinel", encoding="utf-8")
+
+    with pytest.raises(DocumentMetadataError):
+        service._resolve_stored_path(dangerous)
+
+    assert sentinel.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_resolve_stored_path_accepts_valid_uuids(tmp_path: Path) -> None:
+    service, _embedding, upload_dir = _make_service(tmp_path)
+    for suffix in ("txt", "md", "pdf"):
+        name = _stored_name(f"ok{suffix}", suffix)
+        resolved = service._resolve_stored_path(name)
+        assert resolved.parent == upload_dir.resolve()
+        assert resolved.name == name
+
+
+def test_chunks_for_document_never_reads_outside_upload_dir(
+    tmp_path: Path,
+) -> None:
+    service, _embedding, upload_dir = _make_service(tmp_path)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = tmp_path / "outside.txt"
+    sentinel.write_text("outside-secret", encoding="utf-8")
+    record = _upload_record("doc-evil", "../../outside.txt")
+
+    with pytest.raises(DocumentMetadataError):
+        service.chunks_for_document(record)
+
+    assert sentinel.read_text(encoding="utf-8") == "outside-secret"
+    assert list(upload_dir.iterdir()) == []
+
+
+def test_delete_resolves_stored_path_through_safe_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _embedding, upload_dir = _make_service(tmp_path)
+    record = service.ingest("notes.txt", "text/plain", "alpha 内容".encode())
+    original_resolve = service._resolve_stored_path
+    resolved_names: list[str] = []
+
+    def recording_resolve(stored_filename: str) -> Path:
+        resolved_names.append(stored_filename)
+        return original_resolve(stored_filename)
+
+    monkeypatch.setattr(service, "_resolve_stored_path", recording_resolve)
+
+    service.delete_document(record.document_id)
+
+    assert resolved_names == [record.stored_filename]
+    assert not (upload_dir / (record.stored_filename or "")).exists()

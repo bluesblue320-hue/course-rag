@@ -9,6 +9,15 @@ from src.documents import DocumentRecord
 from src.exceptions import DocumentMetadataError
 
 
+def _stored_name(document_id: str) -> str:
+    hex_slug = "".join(
+        character
+        for character in document_id
+        if character in "0123456789abcdef"
+    )
+    return f"{hex_slug}{'a' * (32 - len(hex_slug))}.txt"
+
+
 def _record(
     document_id: str,
     *,
@@ -18,7 +27,7 @@ def _record(
     return DocumentRecord(
         document_id=document_id,
         original_filename=f"{document_id}.txt",
-        stored_filename=None if is_builtin else f"stored-{document_id}.txt",
+        stored_filename=None if is_builtin else _stored_name(document_id),
         content_type="text/plain",
         size_bytes=10,
         text_length=5,
@@ -124,9 +133,120 @@ def test_writing_order_is_stable_across_saves(tmp_path: Path) -> None:
 
 def test_stored_filename_round_trips_as_string(tmp_path: Path) -> None:
     repository = DocumentRepository(tmp_path / "documents.json")
-    repository.save_documents([_record("doc-1")])
+    repository.save_documents([_record("doc1")])
 
     loaded = repository.list_documents()
 
     assert isinstance(loaded[0].stored_filename, str)
-    assert loaded[0].stored_filename == "stored-doc-1.txt"
+    assert loaded[0].stored_filename == _stored_name("doc1")
+
+
+def _write_payload(tmp_path: Path, records: list[dict[str, object]]) -> Path:
+    path = tmp_path / "documents.json"
+    path.write_text(
+        __import__("json").dumps({"documents": records}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _record_payload(
+    *,
+    stored_filename: object,
+    is_builtin: bool = False,
+) -> dict[str, object]:
+    return {
+        "document_id": "doc-1",
+        "original_filename": "notes.txt",
+        "stored_filename": stored_filename,
+        "content_type": "text/plain",
+        "size_bytes": 10,
+        "text_length": 10,
+        "chunk_count": 1,
+        "created_at": "2026-08-03T08:00:00Z",
+        "is_builtin": is_builtin,
+    }
+
+
+@pytest.mark.parametrize(
+    "stored_filename",
+    [
+        "../../escape.txt",
+        "../escape.txt",
+        "nested/file.txt",
+        "..\\escape.txt",
+        "..\\..\\escape.txt",
+        "C:/absolute/escape.txt",
+        "C:\\absolute\\escape.txt",
+        "/absolute/escape.txt",
+        "escape.txt",
+        "a" * 31 + ".txt",
+        "A" * 32 + ".txt",
+        "a" * 32 + ".TXT",
+        "a" * 32 + ".docx",
+        "a" * 32 + ".pdf.exe",
+        "aaaa" + ".txt",
+    ],
+)
+def test_repository_rejects_dangerous_stored_filenames(
+    tmp_path: Path,
+    stored_filename: str,
+) -> None:
+    path = _write_payload(
+        tmp_path,
+        [_record_payload(stored_filename=stored_filename)],
+    )
+
+    with pytest.raises(DocumentMetadataError):
+        DocumentRepository(path).list_documents()
+
+
+@pytest.mark.parametrize("suffix", ["txt", "md", "pdf"])
+def test_repository_accepts_valid_uuid_stored_filenames(
+    tmp_path: Path,
+    suffix: str,
+) -> None:
+    stored_filename = f"{'c' * 32}.{suffix}"
+    path = _write_payload(
+        tmp_path,
+        [_record_payload(stored_filename=stored_filename)],
+    )
+
+    loaded = DocumentRepository(path).list_documents()
+
+    assert loaded[0].stored_filename == stored_filename
+
+
+def test_repository_rejects_upload_without_stored_filename(
+    tmp_path: Path,
+) -> None:
+    path = _write_payload(tmp_path, [_record_payload(stored_filename=None)])
+
+    with pytest.raises(DocumentMetadataError):
+        DocumentRepository(path).list_documents()
+
+
+def test_repository_rejects_builtin_with_stored_filename(
+    tmp_path: Path,
+) -> None:
+    path = _write_payload(
+        tmp_path,
+        [_record_payload(stored_filename=f"{'d' * 32}.txt", is_builtin=True)],
+    )
+
+    with pytest.raises(DocumentMetadataError):
+        DocumentRepository(path).list_documents()
+
+
+def test_repository_accepts_builtin_without_stored_filename(
+    tmp_path: Path,
+) -> None:
+    path = _write_payload(
+        tmp_path,
+        [_record_payload(stored_filename=None, is_builtin=True)],
+    )
+
+    loaded = DocumentRepository(path).list_documents()
+
+    assert loaded[0].is_builtin is True
+    assert loaded[0].stored_filename is None

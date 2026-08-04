@@ -108,20 +108,8 @@ def _build_ingestion_dependencies(
         max_upload_bytes=max_upload_bytes,
     )
 
-    loadable_documents: list[DocumentRecord] = []
-    for record in ingestion_service.list_documents():
-        if record.is_builtin:
-            loadable_documents.append(record)
-            continue
-        stored_filename = record.stored_filename
-        if stored_filename is None or not (UPLOAD_DIR / stored_filename).is_file():
-            continue
-        try:
-            ingestion_service.chunks_for_document(record)
-        except (DocumentParseError, EmptyDocumentError):
-            continue
-        loadable_documents.append(record)
-    ingestion_service.initialize_index(loadable_documents)
+    valid_uploads = ingestion_service.reconcile_persisted_documents()
+    ingestion_service.initialize_index([builtin_document, *valid_uploads])
     return ingestion_service, builtin_document
 
 
@@ -594,6 +582,17 @@ def list_documents(request: Request) -> DocumentListResponse:
     )
 
 
+def read_upload_with_limit(
+    upload: UploadFile,
+    max_bytes: int,
+) -> bytes:
+    """Read at most max_bytes + 1 bytes so oversized uploads stay bounded."""
+    data = upload.file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise UploadTooLargeError("文件超过上传大小限制")
+    return data
+
+
 @app.post(
     "/documents",
     response_model=DocumentResponse,
@@ -608,8 +607,12 @@ def upload_document(
     if upload_configuration_error is not None:
         raise upload_configuration_error
 
-    data = file.file.read()
-    record = request.app.state.ingestion_service.ingest(
+    ingestion_service = request.app.state.ingestion_service
+    data = read_upload_with_limit(
+        file,
+        ingestion_service.max_upload_bytes,
+    )
+    record = ingestion_service.ingest(
         file.filename or "",
         file.content_type or "",
         data,

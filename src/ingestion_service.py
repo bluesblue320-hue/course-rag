@@ -18,6 +18,7 @@ from src.documents import (
 from src.exceptions import (
     BuiltinDocumentDeletionError,
     DocumentIngestionError,
+    DocumentMetadataError,
     DocumentNotFoundError,
     DocumentParseError,
     EmptyDocumentError,
@@ -122,13 +123,57 @@ class IngestionService:
             loader = self._loaders[".txt"]
             path = self._builtin_path
         else:
-            suffix = Path(record.stored_filename or "").suffix.lower()
+            stored_filename = record.stored_filename
+            if stored_filename is None:
+                raise DocumentMetadataError("文档元数据损坏，无法读取")
+            suffix = Path(stored_filename).suffix.lower()
             loader = self._loaders.get(suffix)
             if loader is None:
                 raise DocumentParseError("文档类型不受支持")
-            path = self._upload_dir / (record.stored_filename or "")
+            path = self._resolve_stored_path(stored_filename)
         loaded = loader.load(path)
         return chunk_document(loaded, record.document_id, record.original_filename)
+
+    def _resolve_stored_path(self, stored_filename: str) -> Path:
+        """Resolve one stored filename strictly inside the upload directory."""
+        upload_root = self._upload_dir.resolve()
+        candidate = (self._upload_dir / stored_filename).resolve()
+        if candidate.parent != upload_root:
+            raise DocumentMetadataError("文档元数据损坏，无法读取")
+        return candidate
+
+    def reconcile_persisted_documents(self) -> list[DocumentRecord]:
+        """Validate persisted uploads and atomically clean invalid records."""
+        persisted_uploads = self._repository.list_documents()
+        valid_uploads: list[DocumentRecord] = []
+        invalid_uploads: list[DocumentRecord] = []
+        for record in persisted_uploads:
+            if record.is_builtin:
+                invalid_uploads.append(record)
+                continue
+            try:
+                if not self._resolve_stored_path(
+                    record.stored_filename or ""
+                ).is_file():
+                    invalid_uploads.append(record)
+                    continue
+                chunks = self.chunks_for_document(record)
+                if not chunks:
+                    invalid_uploads.append(record)
+                    continue
+            except (DocumentParseError, EmptyDocumentError):
+                invalid_uploads.append(record)
+                continue
+            valid_uploads.append(record)
+
+        if invalid_uploads:
+            self._repository.save_documents(valid_uploads)
+            for record in invalid_uploads:
+                stored_filename = record.stored_filename
+                if stored_filename is None:
+                    continue
+                _unlink_quietly(self._resolve_stored_path(stored_filename))
+        return valid_uploads
 
     def initialize_index(self, documents: list[DocumentRecord]) -> None:
         """Build the initial unified index from a list of documents."""
@@ -223,12 +268,33 @@ class IngestionService:
                     self._repository.save_documents(previous_records)
                     raise
             return record
-        except Exception:
+        except (
+            EmptyDocumentError,
+            DocumentParseError,
+            DocumentMetadataError,
+            DocumentIngestionError,
+        ):
             _unlink_quietly(target_path)
             raise
+        except Exception as exc:
+            _unlink_quietly(target_path)
+            raise DocumentIngestionError("文档处理失败") from exc
 
     def delete_document(self, document_id: str) -> DocumentRecord:
         """Remove one uploaded document while keeping every failure safe."""
+        try:
+            return self._delete_document_locked(document_id)
+        except (
+            DocumentNotFoundError,
+            BuiltinDocumentDeletionError,
+            DocumentMetadataError,
+            DocumentIngestionError,
+        ):
+            raise
+        except Exception as exc:
+            raise DocumentIngestionError("文档处理失败") from exc
+
+    def _delete_document_locked(self, document_id: str) -> DocumentRecord:
         with self._lock:
             previous_records = self._all_records(
                 self._repository.list_documents()
@@ -274,7 +340,7 @@ class IngestionService:
                 raise
 
             if record.stored_filename:
-                target_path = self._upload_dir / record.stored_filename
+                target_path = self._resolve_stored_path(record.stored_filename)
                 try:
                     target_path.unlink()
                 except OSError as exc:
