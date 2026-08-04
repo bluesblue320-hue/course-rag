@@ -55,7 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m scripts.evaluate_rag",
         description=(
             "离线评估 RAG 检索质量与拒答决策，并在 calibration split 上校准"
-            "相似度阈值。本命令不调用大模型，也不会修改生产阈值配置。"
+            "相似度阈值。本命令不调用大模型，不读取 RAG_MIN_RELEVANCE_SCORE，"
+            "也不会修改生产阈值配置。"
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -99,10 +100,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="阈值扫描步长",
     )
     parser.add_argument(
-        "--current-threshold",
+        "--comparison-threshold",
         type=float,
         default=DEFAULT_MIN_RELEVANCE_SCORE,
-        help="当前生产阈值，只用于对比，不会被自动修改",
+        help=(
+            "用于报告对比的阈值。默认使用仓库代码中的拒答默认值；"
+            "它不一定等于当前部署环境中的实际阈值。"
+            "实际部署值不同时请显式传入。本命令不读取 RAG_MIN_RELEVANCE_SCORE，"
+            "也不会修改任何生产配置"
+        ),
     )
     parser.add_argument(
         "--false-answer-weight",
@@ -169,12 +175,15 @@ def _print_summary(run: EvaluationRun, output_dir: Path, root: Path) -> None:
         f"  Hit@1/3/5         : {fmt(retrieval.hit_at_1)} /"
         f" {fmt(retrieval.hit_at_3)} / {fmt(retrieval.hit_at_5)}",
         f"  MRR               : {fmt(retrieval.mean_reciprocal_rank)}",
-        f"  当前阈值          : {run.configuration.current_threshold:.2f}",
+        f"  对比阈值          : {run.configuration.comparison_threshold:.2f}"
+        "（仓库默认值，不一定等于实际部署值）",
         f"  推荐阈值          : {run.recommended_threshold:.2f}"
         "（仅由 calibration split 选出，不会自动写入生产配置）",
         f"  test 决策准确率   : {fmt(test_recommended.decision_accuracy)}",
         f"  test 错误放行率   : {fmt(test_recommended.false_answer_rate)}",
         f"  test 错误拒答率   : {fmt(test_recommended.false_refusal_rate)}",
+        "  说明              : test split 未参与本次阈值选择；"
+        "结果公开后作为回归集使用",
         "报告已写入:",
     ]
     for filename in (SUMMARY_FILENAME, CASES_FILENAME, REPORT_FILENAME):
@@ -226,7 +235,7 @@ def main(
             threshold_start=args.threshold_start,
             threshold_end=args.threshold_end,
             threshold_step=args.threshold_step,
-            current_threshold=args.current_threshold,
+            comparison_threshold=args.comparison_threshold,
             false_answer_weight=args.false_answer_weight,
             false_refusal_weight=args.false_refusal_weight,
             chunk_size=DEFAULT_CHUNK_SIZE,

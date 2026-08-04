@@ -8,6 +8,7 @@ import pytest
 
 from src.evaluation.corpus import load_corpus, load_manifest
 from src.evaluation.dataset import load_dataset
+from src.evaluation.metrics import predict_answerable
 from src.evaluation.report import (
     CASES_CSV_COLUMNS,
     CASES_FILENAME,
@@ -20,7 +21,7 @@ from src.evaluation.report import (
     false_answers,
     false_refusals,
     retrieval_failures,
-    score_overlap,
+    score_range_overlap,
     write_cases_csv,
     write_reports,
     write_summary_json,
@@ -87,7 +88,7 @@ class TestBuildSummary:
     ) -> None:
         summary = build_summary(run)
 
-        assert summary["current_threshold"] == pytest.approx(0.35)
+        assert summary["comparison_threshold"] == pytest.approx(0.35)
         assert summary["recommended_threshold"] == pytest.approx(
             run.recommended_threshold
         )
@@ -113,8 +114,8 @@ class TestBuildSummary:
 
         assert set(failures) == {
             "retrieval_miss_at_5",
-            "false_refusal_current",
-            "false_answer_current",
+            "false_refusal_comparison",
+            "false_answer_comparison",
             "false_refusal_recommended",
             "false_answer_recommended",
         }
@@ -143,34 +144,34 @@ class TestBuildSummary:
         assert ":" not in str(summary["run_configuration"]["dataset_path"])
 
 
-class TestScoreOverlap:
+class TestScoreRangeOverlap:
     def test_it_returns_none_when_the_two_groups_are_separated(self) -> None:
         run = _fake_run(
             answerable_scores=[0.80, 0.75],
             unanswerable_scores=[0.20, 0.30],
         )
 
-        assert score_overlap(run) is None
+        assert score_range_overlap(run) is None
 
-    def test_it_reports_the_band_and_the_case_counts(self) -> None:
+    def test_it_reports_the_range_and_the_case_counts(self) -> None:
         run = _fake_run(
             answerable_scores=[0.40, 0.70],
             unanswerable_scores=[0.20, 0.55],
         )
 
-        overlap = score_overlap(run)
+        overlap = score_range_overlap(run)
 
         assert overlap is not None
-        lower, upper, answerable_in_band, unanswerable_in_band = overlap
+        lower, upper, answerable_in_range, unanswerable_in_range = overlap
         assert lower == pytest.approx(0.40)
         assert upper == pytest.approx(0.55)
-        assert answerable_in_band == 1
-        assert unanswerable_in_band == 1
+        assert answerable_in_range == 1
+        assert unanswerable_in_range == 1
 
     def test_it_returns_none_when_one_group_is_missing(self) -> None:
         run = _fake_run(answerable_scores=[0.5], unanswerable_scores=[])
 
-        assert score_overlap(run) is None
+        assert score_range_overlap(run) is None
 
     def test_the_markdown_states_overlap_honestly(self) -> None:
         overlapping = build_markdown_report(
@@ -188,6 +189,223 @@ class TestScoreOverlap:
 
         assert "重叠" in overlapping
         assert "完全分离" in separated
+
+
+class TestRangeCountIsNotAMinimumErrorCount:
+    """Pin the counter-example that broke the old "unreachable" wording.
+
+    Answerable ``0.50, 0.55`` against unanswerable ``0.60`` puts all three
+    cases inside the range, yet a threshold of ``0.50`` misclassifies only the
+    single unanswerable case. The report must never imply otherwise.
+    """
+
+    def _run(self) -> EvaluationRun:
+        return _fake_run(
+            answerable_scores=[0.50, 0.55],
+            unanswerable_scores=[0.60],
+        )
+
+    def test_the_range_is_detected(self) -> None:
+        overlap = score_range_overlap(self._run())
+
+        assert overlap is not None
+        lower, upper, _, _ = overlap
+        assert lower == pytest.approx(0.50)
+        assert upper == pytest.approx(0.60)
+
+    def test_it_counts_every_case_inside_the_range(self) -> None:
+        overlap = score_range_overlap(self._run())
+
+        assert overlap is not None
+        _, _, answerable_in_range, unanswerable_in_range = overlap
+        assert answerable_in_range == 2
+        assert unanswerable_in_range == 1
+
+    def test_a_single_threshold_beats_the_in_range_count(self) -> None:
+        """Three cases sit in the range, but 0.50 only makes one mistake."""
+        run = self._run()
+
+        mistakes = sum(
+            1
+            for result in run.results
+            if predict_answerable(result, 0.50) != result.answerable
+        )
+
+        overlap = score_range_overlap(run)
+        assert overlap is not None
+        in_range_total = overlap[2] + overlap[3]
+        assert in_range_total == 3
+        assert mistakes == 1
+        assert mistakes < in_range_total
+
+    def test_the_markdown_never_calls_the_range_unreachable(self) -> None:
+        report = build_markdown_report(self._run())
+
+        for banned in (
+            "无法靠单一全局阈值同时判对",
+            "均不可分",
+            "unreachable",
+            "无法判断",
+        ):
+            assert banned not in report
+
+    def test_the_markdown_says_the_count_is_not_a_minimum_error_count(
+        self,
+    ) -> None:
+        report = build_markdown_report(self._run())
+
+        assert "并不等于最少必然出错的题数" in report
+        assert "本报告不计算理论最小错误数" in report
+
+    def test_the_markdown_still_rules_out_a_zero_error_threshold(self) -> None:
+        report = build_markdown_report(self._run())
+
+        assert "不存在能够实现零错误的单一全局阈值" in report
+
+    def test_the_summary_labels_the_counts_as_descriptive(self) -> None:
+        payload = build_summary(self._run())["score_range_overlap"]
+
+        assert isinstance(payload, dict)
+        assert payload["answerable_in_range"] == 2
+        assert payload["unanswerable_in_range"] == 1
+        assert "不是最小错误数" in str(payload["interpretation"])
+
+
+class TestReproducibilityScope:
+    def test_the_markdown_separates_fake_from_real_embedding(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        assert "Fake Embedding" in report
+        assert "真实 Embedding" in report
+
+    def test_the_markdown_requires_the_same_dependency_environment(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        assert "相同依赖版本" in report
+        assert "不同设备或依赖版本造成的末位数值差异" in report
+        assert "不应直接解释为产品效果变化" in report
+
+    def test_the_markdown_does_not_promise_cross_machine_stability(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        for banned in (
+            "任何 diff 都来自真实改动",
+            "任何 diff 都一定来自真实改动",
+            "真实模型在任何环境下逐字节一致",
+        ):
+            assert banned not in report
+
+    def test_the_summary_records_both_reproducibility_scopes(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        payload = build_summary(run)["reproducibility"]
+
+        assert isinstance(payload, dict)
+        assert set(payload) == {
+            "fake_embedding",
+            "real_embedding",
+            "environment_drift",
+        }
+        assert "Fake Embedding" in payload["fake_embedding"]
+        assert "相同依赖版本" in payload["real_embedding"]
+
+
+class TestSplitLifecycle:
+    def test_the_markdown_states_calibration_selects_the_threshold(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        assert "用于扫描和选择相似度阈值。" in build_markdown_report(run)
+
+    def test_the_markdown_states_test_skipped_this_sweep(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        assert "没有参与本次阈值扫描" in build_markdown_report(run)
+
+    def test_the_markdown_demotes_test_to_a_regression_benchmark(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        assert "regression benchmark" in report
+        assert "不应再被视为未来完全未见的最终 holdout" in report
+
+    def test_the_markdown_requires_a_new_final_holdout_later(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        assert "final holdout" in report
+        assert "从未用于开发决策" in report
+
+    def test_the_markdown_drops_the_absolute_claims(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        for banned in (
+            "test split 完全没有参与调参",
+            "始终是无偏最终成绩",
+            "## 测试集最终结果",
+        ):
+            assert banned not in report
+
+    def test_the_summary_records_every_split_role(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        payload = build_summary(run)["split_roles"]
+
+        assert isinstance(payload, dict)
+        assert set(payload) == {
+            "calibration",
+            "test",
+            "regression",
+            "future_final_holdout",
+        }
+
+
+class TestComparisonThresholdWording:
+    def test_the_markdown_calls_it_a_repository_default(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        assert "仓库默认对比阈值" in report
+        assert "不一定等于任何部署环境" in report
+
+    def test_the_markdown_never_calls_it_the_deployed_threshold(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        assert "当前生产阈值" not in report
+        assert "当前阈值" not in report
+
+    def test_the_markdown_says_the_script_ignores_the_env_var(
+        self,
+        run: EvaluationRun,
+    ) -> None:
+        report = build_markdown_report(run)
+
+        assert "不读取" in report
+        assert "RAG_MIN_RELEVANCE_SCORE" in report
 
 
 class TestFailureSelectors:
@@ -256,15 +474,15 @@ class TestCaseRows:
         run: EvaluationRun,
     ) -> None:
         for row, result in zip(build_case_rows(run), run.results, strict=True):
-            expected_current = (
+            expected_comparison = (
                 result.max_relevance_score is not None
-                and result.max_relevance_score >= run.configuration.current_threshold
+                and result.max_relevance_score >= run.configuration.comparison_threshold
             )
-            assert row["predicted_at_current_threshold"] == (
-                "true" if expected_current else "false"
+            assert row["predicted_at_comparison_threshold"] == (
+                "true" if expected_comparison else "false"
             )
-            assert row["decision_correct_current"] == (
-                "true" if expected_current == result.answerable else "false"
+            assert row["decision_correct_comparison"] == (
+                "true" if expected_comparison == result.answerable else "false"
             )
 
     def test_write_cases_csv_uses_a_bom_so_excel_reads_chinese(
@@ -356,8 +574,10 @@ class TestMarkdownReport:
             "## 相似度分布摘要",
             "## 阈值扫描（仅 calibration split）",
             "## 推荐阈值及选择规则",
-            "## 当前阈值与推荐阈值对比",
-            "## 测试集最终结果",
+            "## 对比阈值与推荐阈值对比",
+            "## 初始留出测试结果",
+            "## 数据集 split 的角色与生命周期",
+            "## 可重复性的适用范围",
             "## 主要失败案例",
             "## 已知限制",
             "## 后续建议",
@@ -381,6 +601,7 @@ class TestMarkdownReport:
 
         assert "embedding_model     = fake-bigram-hash" in report
         assert "effective_top_k     = 5" in report
+        assert "comparison_threshold= 0.35" in report
         assert "eval/corpus_manifest.json" in report
 
     def test_it_marks_the_weighting_as_a_business_choice(
@@ -462,7 +683,7 @@ def _fake_run(
             threshold_start=0.2,
             threshold_end=0.6,
             threshold_step=0.1,
-            current_threshold=0.35,
+            comparison_threshold=0.35,
             false_answer_weight=3.0,
             false_refusal_weight=1.0,
         ),
@@ -484,9 +705,9 @@ def _fake_run(
         retrieval_metrics_by_split=group_retrieval_metrics(results, "split"),
         calibration_candidates=candidates,
         recommended_threshold=0.35,
-        calibration_metrics_current=compute_decision_metrics(calibration, 0.35),
+        calibration_metrics_comparison=compute_decision_metrics(calibration, 0.35),
         calibration_metrics_recommended=compute_decision_metrics(calibration, 0.35),
-        test_metrics_current=compute_decision_metrics(test, 0.35),
+        test_metrics_comparison=compute_decision_metrics(test, 0.35),
         test_metrics_recommended=compute_decision_metrics(test, 0.35),
         score_distribution=score_distributions(results),
     )

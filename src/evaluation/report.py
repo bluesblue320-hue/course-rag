@@ -22,6 +22,50 @@ CASES_FILENAME = "cases.csv"
 REPORT_FILENAME = "report.md"
 MAX_FAILURE_EXAMPLES = 5
 
+# Stating each split's role in the artifacts themselves keeps the methodology
+# limits attached to the numbers, instead of only living in a README that a
+# future reader may never open.
+SPLIT_ROLES: tuple[tuple[str, str], ...] = (
+    (
+        "calibration",
+        "用于扫描和选择相似度阈值。",
+    ),
+    (
+        "test",
+        "在本次运行中，用于评估由 calibration 选出的固定阈值；"
+        "它没有参与本次阈值扫描。",
+    ),
+    (
+        "regression",
+        "test 结果公开后应视为已发布的回归测试集，"
+        "适合用来发现明显效果退化。",
+    ),
+    (
+        "future_final_holdout",
+        "正式比较多个 Embedding、Chunk 或 Reranker 方案时，"
+        "需要新增一份从未用于开发决策的独立 final holdout，"
+        "或采用嵌套交叉验证等更严格的方法。",
+    ),
+)
+
+REPRODUCIBILITY_NOTES: tuple[tuple[str, str], ...] = (
+    (
+        "fake_embedding",
+        "自动化测试证明：在 Fake Embedding、相同输入和相同代码下，"
+        "JSON、CSV 与 Markdown 输出逐字节稳定。",
+    ),
+    (
+        "real_embedding",
+        "真实 Embedding 基线只有在相同代码、相同模型、相同依赖版本"
+        "和相近运行环境下才应当稳定。",
+    ),
+    (
+        "environment_drift",
+        "不同设备或依赖版本造成的末位数值差异，"
+        "不应直接解释为产品效果变化。",
+    ),
+)
+
 CASES_CSV_COLUMNS: tuple[str, ...] = (
     "case_id",
     "split",
@@ -38,9 +82,9 @@ CASES_CSV_COLUMNS: tuple[str, ...] = (
     "recall_at_3",
     "recall_at_5",
     "reciprocal_rank",
-    "predicted_at_current_threshold",
+    "predicted_at_comparison_threshold",
     "predicted_at_recommended_threshold",
-    "decision_correct_current",
+    "decision_correct_comparison",
     "decision_correct_recommended",
     "top_source_document",
     "top_source_page",
@@ -151,23 +195,28 @@ def false_answers(
     )
 
 
-def _score_overlap_payload(run: EvaluationRun) -> dict[str, object] | None:
-    overlap = score_overlap(run)
+def _score_range_overlap_payload(run: EvaluationRun) -> dict[str, object] | None:
+    overlap = score_range_overlap(run)
     if overlap is None:
         return None
     lower, upper, answerable_count, unanswerable_count = overlap
     return {
         "lower": _round(lower),
         "upper": _round(upper),
-        "answerable_in_band": answerable_count,
-        "unanswerable_in_band": unanswerable_count,
+        "answerable_in_range": answerable_count,
+        "unanswerable_in_range": unanswerable_count,
+        "interpretation": (
+            "两组最高相似度的取值范围发生重叠，因此本数据集上不存在能够实现"
+            "零错误的单一全局阈值。in_range 只是描述性统计，"
+            "不是最小错误数，也不代表这些题目都会被某一个阈值判断错误。"
+        ),
     }
 
 
 def build_summary(run: EvaluationRun) -> dict[str, object]:
     """Build the stable, JSON-serializable summary payload."""
     configuration = run.configuration
-    current = configuration.current_threshold
+    comparison = configuration.comparison_threshold
     recommended = run.recommended_threshold
     return {
         "schema_version": SCHEMA_VERSION,
@@ -199,16 +248,16 @@ def build_summary(run: EvaluationRun) -> dict[str, object]:
         "calibration_threshold_table": _threshold_table_payload(
             run.calibration_candidates
         ),
-        "current_threshold": _round(current),
+        "comparison_threshold": _round(comparison),
         "recommended_threshold": _round(recommended),
-        "calibration_metrics_current": _decision_metrics_payload(
-            run.calibration_metrics_current
+        "calibration_metrics_comparison": _decision_metrics_payload(
+            run.calibration_metrics_comparison
         ),
         "calibration_metrics_recommended": _decision_metrics_payload(
             run.calibration_metrics_recommended
         ),
-        "test_metrics_current": _decision_metrics_payload(
-            run.test_metrics_current
+        "test_metrics_comparison": _decision_metrics_payload(
+            run.test_metrics_comparison
         ),
         "test_metrics_recommended": _decision_metrics_payload(
             run.test_metrics_recommended
@@ -217,16 +266,18 @@ def build_summary(run: EvaluationRun) -> dict[str, object]:
             key: _score_distribution_payload(value)
             for key, value in sorted(run.score_distribution.items())
         },
-        "score_overlap": _score_overlap_payload(run),
+        "score_range_overlap": _score_range_overlap_payload(run),
+        "split_roles": dict(SPLIT_ROLES),
+        "reproducibility": dict(REPRODUCIBILITY_NOTES),
         "failure_case_ids": {
             "retrieval_miss_at_5": [
                 result.case_id for result in retrieval_failures(run)
             ],
-            "false_refusal_current": [
-                result.case_id for result in false_refusals(run, current)
+            "false_refusal_comparison": [
+                result.case_id for result in false_refusals(run, comparison)
             ],
-            "false_answer_current": [
-                result.case_id for result in false_answers(run, current)
+            "false_answer_comparison": [
+                result.case_id for result in false_answers(run, comparison)
             ],
             "false_refusal_recommended": [
                 result.case_id for result in false_refusals(run, recommended)
@@ -261,11 +312,11 @@ def _csv_number(value: float | None, digits: int = 6) -> str:
 
 def build_case_rows(run: EvaluationRun) -> list[dict[str, str]]:
     """Build one stable CSV row per case in dataset order."""
-    current = run.configuration.current_threshold
+    comparison = run.configuration.comparison_threshold
     recommended = run.recommended_threshold
     rows: list[dict[str, str]] = []
     for result in run.results:
-        predicted_current = predict_answerable(result, current)
+        predicted_comparison = predict_answerable(result, comparison)
         predicted_recommended = predict_answerable(result, recommended)
         top_source = result.sources[0] if result.sources else None
         rows.append(
@@ -288,12 +339,14 @@ def build_case_rows(run: EvaluationRun) -> list[dict[str, str]]:
                 "recall_at_3": _csv_number(result.recall_at(3)),
                 "recall_at_5": _csv_number(result.recall_at(5)),
                 "reciprocal_rank": _csv_number(result.reciprocal_rank),
-                "predicted_at_current_threshold": _csv_bool(predicted_current),
+                "predicted_at_comparison_threshold": _csv_bool(
+                    predicted_comparison
+                ),
                 "predicted_at_recommended_threshold": _csv_bool(
                     predicted_recommended
                 ),
-                "decision_correct_current": _csv_bool(
-                    predicted_current == result.answerable
+                "decision_correct_comparison": _csv_bool(
+                    predicted_comparison == result.answerable
                 ),
                 "decision_correct_recommended": _csv_bool(
                     predicted_recommended == result.answerable
@@ -412,12 +465,22 @@ def _failure_section(
     return lines
 
 
-def score_overlap(run: EvaluationRun) -> tuple[float, float, int, int] | None:
-    """Return the overlapping score band and how many cases fall inside it.
+def score_range_overlap(
+    run: EvaluationRun,
+) -> tuple[float, float, int, int] | None:
+    """Return the overlapping score range and how many cases fall inside it.
 
-    The band is ``[min answerable score, max unanswerable score]``. Any case
-    inside it cannot be separated by a single global threshold, so the tuple
-    states exactly how many questions of each kind are unreachable.
+    The range is ``[min answerable score, max unanswerable score]``. It exists
+    only when ``max unanswerable >= min answerable``, which proves that no
+    single global threshold can score zero errors on this dataset.
+
+    The two counts are **descriptive statistics about the score distribution**.
+    They are not a minimum error count, and they do not say that every case in
+    the     range is misclassified by some threshold. With answerable scores
+    ``0.50, 0.55`` and an unanswerable score ``0.60`` all three cases sit in the
+    range, yet a threshold of ``0.50`` makes only one mistake. Deriving the real
+    minimum would need an optimal-split search, which this report deliberately
+    does not attempt.
     """
     answerable_scores = [
         result.max_relevance_score
@@ -444,27 +507,36 @@ def score_overlap(run: EvaluationRun) -> tuple[float, float, int, int] | None:
     )
 
 
-def _overlap_note(run: EvaluationRun) -> str:
+def _overlap_note(run: EvaluationRun) -> list[str]:
     """Describe the separability of the two score distributions honestly."""
-    overlap = score_overlap(run)
+    overlap = score_range_overlap(run)
     if overlap is None:
-        return (
-            "资料内问题的最低分高于资料外问题的最高分，两组分布完全分离，"
-            "在本基准上存在能同时避免误答与误拒的阈值。"
-        )
+        return [
+            "资料内问题的最低分高于资料外问题的最高分，两组取值范围完全分离，"
+            "在本基准上存在能同时避免误答与误拒的阈值。",
+        ]
     lower, upper, answerable_count, unanswerable_count = overlap
-    return (
-        f"两组分布在 [{lower:.4f}, {upper:.4f}] 区间重叠，"
-        f"其中资料内 {answerable_count} 题、资料外 {unanswerable_count} 题落在重叠带内。"
-        "落在重叠带内的题目无法靠单一全局阈值同时判对，"
-        "继续压低两类错误需要改进检索本身或引入二阶段判断，而不是继续微调阈值。"
-    )
+    return [
+        f"两组最高相似度的取值范围在 [{lower:.4f}, {upper:.4f}] 内发生重叠。"
+        f"其中资料内 {answerable_count} 题、资料外 {unanswerable_count} 题的分数"
+        "落在该范围内。",
+        "",
+        "这证明本数据集上**不存在能够实现零错误的单一全局阈值**，"
+        "但区间内题数只是分布描述，**并不等于最少必然出错的题数**，"
+        "也不代表这些题目都会被某一个阈值判断错误。",
+        "",
+        "举例：资料内分数 0.50、0.55，资料外分数 0.60，三题都落在区间内，"
+        "但阈值取 0.50 时只错 1 题。本报告不计算理论最小错误数。",
+        "",
+        "继续压低两类错误需要改进检索本身或引入二阶段判断，"
+        "而不是只靠继续微调阈值。",
+    ]
 
 
 def build_markdown_report(run: EvaluationRun) -> str:
     """Build the human-readable Markdown report."""
     configuration = run.configuration
-    current = configuration.current_threshold
+    comparison = configuration.comparison_threshold
     recommended = run.recommended_threshold
     answerable_count = sum(1 for case in run.cases if case.answerable)
     distribution = run.score_distribution
@@ -489,10 +561,16 @@ def build_markdown_report(run: EvaluationRun) -> str:
         f"dataset             = {configuration.dataset_path}",
         f"threshold_range     = [{configuration.threshold_start}, "
         f"{configuration.threshold_end}] step {configuration.threshold_step}",
-        f"current_threshold   = {current}",
+        f"comparison_threshold= {comparison}",
         f"false_answer_weight = {configuration.false_answer_weight}",
         f"false_refusal_weight= {configuration.false_refusal_weight}",
         "```",
+        "",
+        f"`comparison_threshold = {comparison}` 是**仓库默认对比阈值**，"
+        "只用于把推荐阈值放在一个参照系里看。评估脚本不读取 "
+        "`RAG_MIN_RELEVANCE_SCORE`，因此这个数值**不一定等于任何部署环境"
+        "当前实际使用的阈值**；要对比真实部署值，请显式传入 "
+        "`--comparison-threshold`。",
         "",
         "## 语料说明",
         "",
@@ -555,7 +633,13 @@ def build_markdown_report(run: EvaluationRun) -> str:
             f" {_format_optional(unanswerable_dist.p75)} |"
             f" {_format_optional(unanswerable_dist.maximum)} |",
             "",
-            overlap_note,
+            "### 分数范围重叠",
+            "",
+        ]
+    )
+    lines.extend(overlap_note)
+    lines.extend(
+        [
             "",
             "## 阈值扫描（仅 calibration split）",
             "",
@@ -592,22 +676,23 @@ def build_markdown_report(run: EvaluationRun) -> str:
             "## 推荐阈值及选择规则",
             "",
             f"- 推荐阈值：**{recommended:.2f}**",
-            f"- 当前生产阈值：**{current:.2f}**",
-            "- 选择只使用 calibration split，test split 完全没有参与调参。",
+            f"- 仓库默认对比阈值：**{comparison:.2f}**"
+            "（不一定等于实际部署值）",
+            "- 选择只使用 calibration split，test split 没有参与本次阈值扫描。",
             "- 确定性排序规则：weighted_cost 最低 → false_answer 更少 →"
             " false_refusal 更少 → 决策准确率更高 → 阈值更高（保守）。",
             "- 推荐阈值**不会**自动写入生产配置，是否采纳需要单独决策。",
             "",
-            "## 当前阈值与推荐阈值对比",
+            "## 对比阈值与推荐阈值对比",
             "",
         ]
     )
     lines.extend(
         _decision_table(
             [
-                ("calibration @ 当前阈值", run.calibration_metrics_current),
+                ("calibration @ 对比阈值", run.calibration_metrics_comparison),
                 ("calibration @ 推荐阈值", run.calibration_metrics_recommended),
-                ("test @ 当前阈值", run.test_metrics_current),
+                ("test @ 对比阈值", run.test_metrics_comparison),
                 ("test @ 推荐阈值", run.test_metrics_recommended),
             ]
         )
@@ -616,10 +701,10 @@ def build_markdown_report(run: EvaluationRun) -> str:
     lines.extend(
         [
             "",
-            "## 测试集最终结果",
+            "## 初始留出测试结果",
             "",
             "推荐阈值在 calibration 上固定之后，只在 test split 上运行一次，"
-            "结果不再用于回头调整阈值。",
+            "本次结果不再用于回头调整阈值。",
             "",
             f"- test 决策准确率（推荐阈值）："
             f"{_format_optional(run.test_metrics_recommended.decision_accuracy)}",
@@ -627,6 +712,29 @@ def build_markdown_report(run: EvaluationRun) -> str:
             f"{_format_optional(run.test_metrics_recommended.false_answer_rate)}",
             f"- test 错误拒答率（推荐阈值）："
             f"{_format_optional(run.test_metrics_recommended.false_refusal_rate)}",
+            "",
+            "## 数据集 split 的角色与生命周期",
+            "",
+            "| split | 角色 |",
+            "| --- | --- |",
+            *(f"| `{name}` | {description} |" for name, description in SPLIT_ROLES),
+            "",
+            "本次推荐阈值只由 calibration split 选择，随后在 test split 上评估一次。",
+            "由于 test 结果现已公开（写入仓库、出现在 PR 描述、并被用于判断推荐阈值"
+            "是否合理），它后续适合作为 **regression benchmark** 使用，"
+            "**不应再被视为未来完全未见的最终 holdout**。",
+            "",
+            "## 可重复性的适用范围",
+            "",
+            "| 场景 | 结论 |",
+            "| --- | --- |",
+            *(
+                f"| `{name}` | {description} |"
+                for name, description in REPRODUCIBILITY_NOTES
+            ),
+            "",
+            "换句话说：逐字节稳定这条结论来自 Fake Embedding 路径的自动化测试，"
+            "**不能外推**到不同机器、不同依赖版本上的真实 Embedding 基线。",
             "",
             "## 主要失败案例",
             "",
@@ -642,17 +750,17 @@ def build_markdown_report(run: EvaluationRun) -> str:
     )
     lines.extend(
         _failure_section(
-            f"错误拒答（当前阈值 {current:.2f}）",
+            f"错误拒答（对比阈值 {comparison:.2f}）",
             "错误拒答",
-            false_refusals(run, current),
+            false_refusals(run, comparison),
             run,
         )
     )
     lines.extend(
         _failure_section(
-            f"错误放行（当前阈值 {current:.2f}）",
+            f"错误放行（对比阈值 {comparison:.2f}）",
             "错误放行",
-            false_answers(run, current),
+            false_answers(run, comparison),
             run,
         )
     )
@@ -667,13 +775,19 @@ def build_markdown_report(run: EvaluationRun) -> str:
             "- Hit@5 高不代表最终答案一定正确。",
             "- 错误放行与错误拒答的权重是业务选择，换一个业务场景需要重新设定。",
             "- 索引规模较小时 Top-5 覆盖了较大比例的 Chunk，Hit@5 会偏乐观。",
+            "- 分数范围重叠只说明不存在零错误阈值，区间内题数不是最小错误数。",
+            "- 逐字节可重复性只在 Fake Embedding 路径上被验证过，"
+            "真实模型跨环境可能有末位差异。",
+            "- test 结果已公开，后续只应作为回归集，不能当作未见的最终 holdout。",
             "",
             "## 后续建议",
             "",
             "- 扩充语料和题量，特别是 `out_of_scope_near` 类型。",
             "- 更换 Chunk 参数、Embedding 模型或引入 Reranker 后重新跑一次基线，"
             "对比是否退化。",
-            "- 若两组分数分布重叠严重，优先改进检索，而不是继续微调阈值。",
+            "- 若两组分数取值范围重叠严重，优先改进检索，而不是继续微调阈值。",
+            "- 正式比较多个检索方案时，先准备一份从未参与开发决策的独立 "
+            "final holdout。",
             "- 是否把推荐阈值写入生产配置，应作为独立决策单独提交。",
             "",
         ]

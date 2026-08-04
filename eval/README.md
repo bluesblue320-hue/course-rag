@@ -6,7 +6,7 @@
 1. 正确证据有没有进入 Top-K，通常排在第几名。
 2. 资料内的问题有多少被错误拒答。
 3. 资料外的问题有多少被错误放行。
-4. 当前相似度阈值 `0.35` 是否合理，换成多少更好。
+4. 仓库默认对比阈值 `0.35` 在这份受控基准上是否合理，换成多少更好。
 
 评估**只测检索质量和回答/拒答决策**。它不调用 LLM，不评估生成答案的质量，也不评估答案忠实度。
 
@@ -57,7 +57,7 @@ python -m scripts.evaluate_rag
 python -m scripts.evaluate_rag \
   --top-k 5 \
   --threshold-start 0.20 --threshold-end 0.60 --threshold-step 0.01 \
-  --current-threshold 0.35 \
+  --comparison-threshold 0.35 \
   --false-answer-weight 3.0 --false-refusal-weight 1.0 \
   --output-dir reports/generated
 ```
@@ -136,7 +136,7 @@ python -m scripts.evaluate_rag \
 | 字段 | 说明 |
 | --- | --- |
 | `id` | 全局唯一 |
-| `split` | `calibration`（调参用）或 `test`（留出，不参与调参） |
+| `split` | `calibration`（用于扫描和选择阈值）或 `test`（留出，本次没有参与阈值扫描；结果公开后适合作为回归基准，不再是未来完全未见的最终 holdout） |
 | `answerable` | 资料内能否回答 |
 | `category` | `direct` / `paraphrase` / `multi_evidence` / `out_of_scope_far` / `out_of_scope_near` |
 | `difficulty` | `easy` / `medium` / `hard` |
@@ -236,17 +236,16 @@ weighted_cost = FP × false_answer_weight + FN × false_refusal_weight
 
 | 场景 | 决策准确率 | 错误放行率 | 错误拒答率 |
 | --- | ---: | ---: | ---: |
-| calibration @ 0.35（当前） | 0.8810 | 0.2941 | 0.0000 |
+| calibration @ 0.35（仓库默认对比值） | 0.8810 | 0.2941 | 0.0000 |
 | calibration @ 0.49（推荐） | 0.9524 | 0.0588 | 0.0400 |
-| test @ 0.35（当前） | 0.7778 | 0.5714 | 0.0000 |
+| test @ 0.35（仓库默认对比值） | 0.7778 | 0.5714 | 0.0000 |
 | test @ 0.49（推荐） | 0.8333 | 0.1429 | 0.1818 |
 
-**关于 0.35 是否合理**：在这份基准上不合理，它太松。test split 上 0.35 会放行 57% 的资料外问题。
+**关于 0.35 是否合理**：`0.35` 是仓库代码里的拒答默认值，仅作为报告里的对比基准；它**不一定等于**部署环境实际生效的阈值（部署值可能由 `RAG_MIN_RELEVANCE_SCORE` 覆盖）。在这份基准上，把仓库默认对比值 `0.35` 当阈值不合理，它太松。test split 上 0.35 会放行 57% 的资料外问题。
 推荐阈值 0.49 把错误放行率压到 14%，代价是 18% 的错误拒答。
 
 **但阈值不是全部问题。** 两组分数在 `[0.4377, 0.5879]` 区间重叠，
-其中资料内 19 题、资料外 4 题落在重叠带内。落在带内的题目**无法靠单一全局阈值同时判对**。
-继续压低两类错误需要改进检索本身（更好的 Embedding、Reranker、更细的切分），
+其中资料内 19 题、资料外 4 题落在重叠带内。**这个数量只是一个描述性统计**：它说明有多少题的得分落在两组都覆盖的区间里，并不等于"最少必然出错的题数"。事实上不存在能实现零错误的单一全局阈值（否则两组分数应完全分离），但具体某个阈值到底会错几题，要看每题真正的可回答性，而不是区间里的题数。继续压低两类错误需要改进检索本身（更好的 Embedding、Reranker、更细的切分），
 而不是继续微调阈值。
 
 ---
@@ -260,10 +259,11 @@ python -m scripts.evaluate_rag --output-dir reports/generated
 ```
 
 然后把 `reports/generated/summary.json` 和 `reports/baseline/summary.json` 对比。
-重点看 `retrieval_metrics.overall`、`test_metrics_recommended`、`score_overlap` 三块。
+重点看 `retrieval_metrics.overall`、`test_metrics_recommended`、`score_range_overlap` 三块。
 `summary.json` 带 `schema_version`，字段变动时能识别出来。
 
-同一份输入跑两次的输出是**逐字节一致**的（测试里有断言），所以任何 diff 都来自真实改动。
+在 Fake Embedding 路径下，同一份输入跑两次的输出是**逐字节一致**的（测试里有断言），因此该路径上的任何 diff 都来自真实改动。
+但使用真实 Embedding（`sentence-transformers`）时，跨机器、跨依赖版本、跨运行可能引入末位数值差异，这类差异不应直接解释为产品效果变化；做跨机器对比前需先对齐依赖版本。
 
 确认新版本更好之后，再把新报告拷进 `reports/baseline/` 作为新基线，作为单独一次提交。
 

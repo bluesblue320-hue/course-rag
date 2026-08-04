@@ -579,9 +579,9 @@
       "weighted_cost": 16.0
     }
   ],
-  "current_threshold": 0.35,
+  "comparison_threshold": 0.35,
   "recommended_threshold": 0.49,
-  "calibration_metrics_current": {
+  "calibration_metrics_comparison": {
     "threshold": 0.35,
     "case_count": 42,
     "true_positive": 25,
@@ -611,7 +611,7 @@
     "answer_rate": 0.595238,
     "refusal_rate": 0.404762
   },
-  "test_metrics_current": {
+  "test_metrics_comparison": {
     "threshold": 0.35,
     "case_count": 18,
     "true_positive": 11,
@@ -661,11 +661,23 @@
       "p75": 0.423459
     }
   },
-  "score_overlap": {
+  "score_range_overlap": {
     "lower": 0.437686,
     "upper": 0.587912,
-    "answerable_in_band": 19,
-    "unanswerable_in_band": 4
+    "answerable_in_range": 19,
+    "unanswerable_in_range": 4,
+    "interpretation": "两组最高相似度的取值范围发生重叠，因此本数据集上不存在能够实现零错误的单一全局阈值。in_range 只是描述性统计，不是最小错误数，也不代表这些题目都会被某一个阈值判断错误。"
+  },
+  "split_roles": {
+    "calibration": "用于扫描和选择相似度阈值。",
+    "test": "在本次运行中，用于评估由 calibration 选出的固定阈值；它没有参与本次阈值扫描。",
+    "regression": "test 结果公开后应视为已发布的回归测试集，适合用来发现明显效果退化。",
+    "future_final_holdout": "正式比较多个 Embedding、Chunk 或 Reranker 方案时，需要新增一份从未用于开发决策的独立 final holdout，或采用嵌套交叉验证等更严格的方法。"
+  },
+  "reproducibility": {
+    "fake_embedding": "自动化测试证明：在 Fake Embedding、相同输入和相同代码下，JSON、CSV 与 Markdown 输出逐字节稳定。",
+    "real_embedding": "真实 Embedding 基线只有在相同代码、相同模型、相同依赖版本和相近运行环境下才应当稳定。",
+    "environment_drift": "不同设备或依赖版本造成的末位数值差异，不应直接解释为产品效果变化。"
   },
   "failure_case_ids": {
     "retrieval_miss_at_5": [
@@ -673,8 +685,8 @@
       "p-010",
       "p-012"
     ],
-    "false_refusal_current": [],
-    "false_answer_current": [
+    "false_refusal_comparison": [],
+    "false_answer_comparison": [
       "on-001",
       "on-004",
       "on-005",
@@ -703,7 +715,7 @@
     "threshold_start": 0.2,
     "threshold_end": 0.6,
     "threshold_step": 0.01,
-    "current_threshold": 0.35,
+    "comparison_threshold": 0.35,
     "false_answer_weight": 3.0,
     "false_refusal_weight": 1.0
   }

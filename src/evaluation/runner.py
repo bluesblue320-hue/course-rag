@@ -49,7 +49,13 @@ class EmbeddingProtocol(Protocol):
 
 @dataclass(frozen=True)
 class RunConfiguration:
-    """Describe one reproducible evaluation run, using repository-relative paths."""
+    """Describe one reproducible evaluation run, using repository-relative paths.
+
+    ``comparison_threshold`` is the value the report compares the recommended
+    threshold against. It defaults to the repository refusal default and is
+    deliberately independent of ``RAG_MIN_RELEVANCE_SCORE``, so it is not
+    necessarily the threshold any particular deployment actually runs.
+    """
 
     manifest_path: str
     dataset_path: str
@@ -58,7 +64,7 @@ class RunConfiguration:
     threshold_start: float
     threshold_end: float
     threshold_step: float
-    current_threshold: float
+    comparison_threshold: float
     false_answer_weight: float
     false_refusal_weight: float
 
@@ -88,9 +94,9 @@ class EvaluationRun:
     retrieval_metrics_by_split: dict[str, RetrievalMetrics]
     calibration_candidates: tuple[ThresholdCandidate, ...]
     recommended_threshold: float
-    calibration_metrics_current: DecisionMetrics
+    calibration_metrics_comparison: DecisionMetrics
     calibration_metrics_recommended: DecisionMetrics
-    test_metrics_current: DecisionMetrics
+    test_metrics_comparison: DecisionMetrics
     test_metrics_recommended: DecisionMetrics
     score_distribution: dict[str, ScoreDistribution]
 
@@ -187,7 +193,7 @@ def run_evaluation(
     threshold_start: float,
     threshold_end: float,
     threshold_step: float,
-    current_threshold: float = DEFAULT_MIN_RELEVANCE_SCORE,
+    comparison_threshold: float = DEFAULT_MIN_RELEVANCE_SCORE,
     false_answer_weight: float = 3.0,
     false_refusal_weight: float = 1.0,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
@@ -257,7 +263,7 @@ def run_evaluation(
             threshold_start=float(threshold_start),
             threshold_end=float(threshold_end),
             threshold_step=float(threshold_step),
-            current_threshold=float(current_threshold),
+            comparison_threshold=float(comparison_threshold),
             false_answer_weight=answer_weight,
             false_refusal_weight=refusal_weight,
         ),
@@ -285,14 +291,14 @@ def run_evaluation(
         ),
         calibration_candidates=calibration_candidates,
         recommended_threshold=recommended.threshold,
-        calibration_metrics_current=compute_decision_metrics(
+        calibration_metrics_comparison=compute_decision_metrics(
             calibration_results,
-            current_threshold,
+            comparison_threshold,
         ),
         calibration_metrics_recommended=recommended.metrics,
-        test_metrics_current=compute_decision_metrics(
+        test_metrics_comparison=compute_decision_metrics(
             test_results,
-            current_threshold,
+            comparison_threshold,
         ),
         test_metrics_recommended=compute_decision_metrics(
             test_results,
@@ -310,5 +316,11 @@ def calibration_split(
 
 
 def test_split(cases: tuple[EvaluationCase, ...]) -> tuple[EvaluationCase, ...]:
-    """Return the held-out test cases, never used to tune the threshold."""
+    """Return the test cases, which never take part in the threshold sweep.
+
+    These cases evaluate a threshold that calibration already fixed. Once their
+    results are published they behave as a regression benchmark rather than an
+    unseen final holdout, so comparing several retrieval designs later needs a
+    fresh holdout that has not informed any development decision.
+    """
     return split_cases(cases, "test")
