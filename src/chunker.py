@@ -1,10 +1,15 @@
 """Split text into simple fixed-length overlapping chunks."""
 
+# Named so that offline evaluation can report the exact production settings
+# instead of duplicating literals that could silently drift apart.
+DEFAULT_CHUNK_SIZE = 300
+DEFAULT_CHUNK_OVERLAP = 50
+
 
 def split_text(
     text: str,
-    chunk_size: int = 300,
-    chunk_overlap: int = 50,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ) -> list[str]:
     """Return non-blank chunks produced by a fixed-size sliding window."""
     if chunk_size <= 0:
