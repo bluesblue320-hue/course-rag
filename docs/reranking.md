@@ -60,7 +60,11 @@ Reranker 分数语义不同，分布不同，直接套用会导致拒答行为�
 RAG_RERANKER_ENABLED=false
 
 # CrossEncoder 模型名称（启用时必填）
-RAG_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+# 必须与语料语言匹配：本项目语料为中文，应使用中文或多语言 CrossEncoder 模型，
+# 不要默认使用英文 MS MARCO 模型（如 cross-encoder/ms-marco-MiniLM-L-6-v2）。
+# 模型必须提前下载并存在于本地缓存或本地目录；加载以 local_files_only 方式，
+# 不会自动联网下载。
+RAG_RERANKER_MODEL=<本地缓存的中文或多语言 CrossEncoder 模型>
 
 # 候选池大小（默认 15，最小 5，最大 100）
 RAG_RERANKER_CANDIDATE_TOP_K=15
@@ -71,6 +75,25 @@ RAG_RERANKER_CANDIDATE_TOP_K=15
 - `/search` 和 `/ask` 行为与原来完全一致
 - `/health` 中 `reranker_enabled=false`
 
+## 离线模型加载（强制）
+
+CrossEncoder 模型以 `local_files_only=True` 方式加载：
+
+- 模型已缓存在本地 → 正常加载。
+- 模型不存在于本地 → 清晰失败，**不会自动联网下载**。
+- 评估 CLI 与生产加载都遵循此规则。
+
+若未提前下载模型，请勿启用 Reranker；启用后加载失败不会导致应用启动失败，
+`/search` 和 `/ask` 仍按 vector-only 工作，`/health` 报告
+`reranker_status=load_failed`（不会暴露本地路径、堆栈或内部异常原文）。
+
+## Reranker 模型语言必须匹配语料
+
+- 本项目语料为中文，**不应默认使用英文 MS MARCO 模型**。
+- Reranker 模型必须使用中文或多语言 CrossEncoder 模型。
+- 真实 baseline 必须记录完整模型名称，推荐同时记录 model revision。
+- 没有合适的本地模型时，指标保持 `N/A`，**不得**用 FakeReranker 结果冒充真实效果。
+
 ## 如何运行 A/B 评估
 
 ```bash
@@ -79,9 +102,15 @@ python -m scripts.evaluate_reranker \
   --dataset eval/dataset.jsonl \
   --candidate-top-k 15 \
   --final-top-k 5 \
-  --reranker-model "cross-encoder/ms-marco-MiniLM-L-6-v2" \
+  --reranker-model "<本地缓存的中文或多语言 CrossEncoder 模型>" \
   --output-dir reports/generated/reranking
 ```
+
+> 说明：Reranker 模型必须与语料语言匹配。本项目语料为中文，**不应默认使用英文
+> MS MARCO 模型**（如 `cross-encoder/ms-marco-MiniLM-L-6-v2`）。模型必须提前下载
+> 并存在于本地缓存或本地目录；评估以 `local_files_only` 方式加载，不会自动联网
+> 下载。真实 baseline 必须记录完整模型名称（推荐同时记录 model revision）。没有
+> 合适的本地模型时，保持指标为 `N/A`，**不得**用 FakeReranker 结果冒充真实效果。
 
 输出文件：
 

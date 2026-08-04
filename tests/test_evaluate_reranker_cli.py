@@ -52,8 +52,24 @@ class TestHelpNoModelLoad:
 
 class TestArgumentValidation:
     def test_candidate_top_k_too_small(self) -> None:
-        exit_code = main(["--candidate-top-k", "3", "--reranker-model", "test"])
+        # A/B evaluation requires candidate_top_k >= 15.
+        exit_code = main(["--candidate-top-k", "10", "--reranker-model", "test"])
         assert exit_code == EXIT_INVALID_INPUT
+
+    def test_candidate_top_k_15_accepted(self, tmp_path: Path) -> None:
+        exit_code = main(
+            [
+                "--manifest", DEFAULT_MANIFEST,
+                "--dataset", DEFAULT_DATASET,
+                "--output-dir", str(tmp_path / "o"),
+                "--candidate-top-k", "15",
+                "--final-top-k", "5",
+                "--reranker-model", "fake-reranker",
+            ],
+            embedding_factory=fake_embedding_factory,
+            reranker_factory=fake_reranker_factory,
+        )
+        assert exit_code == EXIT_OK
 
     def test_final_top_k_too_small(self) -> None:
         exit_code = main(["--final-top-k", "3", "--reranker-model", "test"])

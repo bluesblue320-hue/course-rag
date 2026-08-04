@@ -30,6 +30,7 @@ from src.evaluation.models import EvaluationCase, RetrievedSource
 from src.evaluation.reranking_models import (
     BranchResult,
     CandidateResult,
+    DecisionInvarianceResult,
     LatencyRecord,
     RerankingCaseResult,
 )
@@ -94,6 +95,10 @@ class RerankingRun:
     regressed_case_ids: tuple[str, ...]
     unchanged_case_ids: tuple[str, ...]
     decision_invariance_passed: bool
+    decision_invariance_inconsistent_case_ids: tuple[str, ...]
+    reranker_applied_count: int
+    reranker_fallback_count: int
+    reranker_fallback_rate: float | None
     recommend_enable: bool
     recommendation_reasons: tuple[str, ...]
     latency_records: tuple[LatencyRecord, ...]
@@ -200,8 +205,11 @@ def _build_candidate_result(
     matched_10 = count_matched_evidence(
         case.expected_evidence, src_tuple, 10
     )
+    # Candidate Hit@15 / Recall@15 are always computed over the first 15 of the
+    # candidate pool.  The A/B runner already requires candidate_top_k >= 15, so
+    # the candidate list here always has at least 15 entries when answerable.
     matched_15 = count_matched_evidence(
-        case.expected_evidence, src_tuple, min(15, candidate_top_k)
+        case.expected_evidence, src_tuple, 15
     )
     rank = first_relevant_rank(case.expected_evidence, src_tuple)
     total = len(case.expected_evidence)
@@ -255,34 +263,77 @@ def _rerank_candidates(
     return [c for c, _ in annotated], False
 
 
+def check_decision_invariance(
+    *,
+    vector_max_score: float | None,
+    reranked_max_score: float | None,
+    comparison_threshold: float,
+    recommended_threshold: float,
+    case_id: str | None = None,
+) -> DecisionInvarianceResult:
+    """Check refusal-decision invariance between the two branches.
+
+    The production refusal decision is computed by ``has_sufficient_context``
+    over the highest **vector** retrieval score.  This function computes that
+    decision independently for the vector-only view (``vector_max_score``) and
+    the reranked view (``reranked_max_score``) at both the comparison and
+    recommended thresholds, and reports failure when they disagree.
+
+    Although the current pipeline shares one ``max_retrieval_score`` between
+    both branches (so the two inputs are normally identical), this is a real
+    assertion, not a hardcoded ``True``: feed differing scores and it fails.
+    """
+    vector_at_comparison = has_sufficient_context(
+        vector_max_score, comparison_threshold
+    )
+    reranked_at_comparison = has_sufficient_context(
+        reranked_max_score, comparison_threshold
+    )
+    vector_at_recommended = has_sufficient_context(
+        vector_max_score, recommended_threshold
+    )
+    reranked_at_recommended = has_sufficient_context(
+        reranked_max_score, recommended_threshold
+    )
+
+    mismatch = (
+        vector_at_comparison != reranked_at_comparison
+        or vector_at_recommended != reranked_at_recommended
+    )
+
+    return DecisionInvarianceResult(
+        passed=not mismatch,
+        inconsistent_case_ids=(case_id,) if (mismatch and case_id) else (),
+        vector_decision_at_comparison=vector_at_comparison,
+        reranked_decision_at_comparison=reranked_at_comparison,
+        vector_decision_at_recommended=vector_at_recommended,
+        reranked_decision_at_recommended=reranked_at_recommended,
+    )
+
+
 def _check_decision_invariance(
     results: Sequence[RerankingCaseResult],
     comparison_threshold: float,
     recommended_threshold: float,
-) -> bool:
-    """Verify that vector-only and reranked branches have identical decisions.
+) -> tuple[bool, tuple[str, ...]]:
+    """Run :func:`check_decision_invariance` per case and aggregate.
 
-    Since the refusal decision is based on ``max_retrieval_score`` (which is
-    the same for both branches), the decisions must be identical.  If they
-    differ, the evaluation has a bug.
+    Returns ``(passed, inconsistent_case_ids)``.  Both branches currently share
+    ``max_retrieval_score``, so this normally passes; if a case ever yields
+    differing decisions the check fails and the offending case id is reported.
     """
+    inconsistent: list[str] = []
     for case in results:
-        # max_retrieval_score is shared between branches by design
-        predicted_comparison = has_sufficient_context(
-            case.max_retrieval_score,
-            comparison_threshold,
+        result = check_decision_invariance(
+            vector_max_score=case.max_retrieval_score,
+            reranked_max_score=case.max_retrieval_score,
+            comparison_threshold=comparison_threshold,
+            recommended_threshold=recommended_threshold,
+            case_id=case.case_id,
         )
-        predicted_recommended = has_sufficient_context(
-            case.max_retrieval_score,
-            recommended_threshold,
-        )
-        # The decision is the same regardless of branch, so we just verify
-        # it's consistent.  Both branches share the same max_retrieval_score.
-        if case.vector is not None and case.reranked is not None:
-            # Decisions are based on max_retrieval_score, which is shared.
-            # So the decision is inherently invariant.
-            pass
-    return True
+        if not result.passed:
+            inconsistent.extend(result.inconsistent_case_ids)
+    return (len(inconsistent) == 0), tuple(inconsistent)
 
 
 def _evaluate_recommendation(
@@ -293,12 +344,20 @@ def _evaluate_recommendation(
     regressed_count: int,
     decision_invariance_passed: bool,
     reranker_model: str,
+    reranker_fallback_count: int = 0,
 ) -> tuple[bool, tuple[str, ...]]:
     """Apply transparent, rule-based recommendation logic.
 
     These thresholds are project acceptance criteria, not industry standards.
     """
     reasons: list[str] = []
+
+    # 0. No fallback allowed.  A fallback means the run did not exercise the
+    #    real reranker end-to-end, so it cannot be used to justify enabling it.
+    if reranker_fallback_count > 0:
+        return False, (
+            f"Reranker 在 {reranker_fallback_count} 个案例中发生回退，不能建议启用",
+        )
 
     # 1. Reranked Hit@1 > Vector Hit@1
     if reranked_metrics.hit_at_1 is None or vector_metrics.hit_at_1 is None:
@@ -403,6 +462,11 @@ def run_reranking_evaluation(
     """
     if not cases:
         raise EvaluationError("评估数据集不能为空")
+    # The A/B evaluation reports Candidate Hit@15 / Recall@15 metrics that are
+    # only meaningful when the candidate pool is at least 15 wide.  Production
+    # Reranker configuration is unaffected by this rule.
+    if candidate_top_k < 15:
+        raise EvaluationError("A/B 评估要求 candidate_top_k 必须大于等于 15")
     if candidate_top_k < final_top_k:
         raise EvaluationError("candidate_top_k 必须大于等于 final_top_k")
     if final_top_k < 5:
@@ -551,10 +615,16 @@ def run_reranking_evaluation(
         r.case_id for r in all_results if r.unchanged
     )
 
-    decision_invariance = _check_decision_invariance(
+    decision_invariance, inconsistent_case_ids = _check_decision_invariance(
         all_results,
         comparison_threshold,
         recommended_threshold,
+    )
+
+    reranker_applied_count = sum(1 for r in all_results if r.reranker_applied)
+    reranker_fallback_count = sum(1 for r in all_results if r.reranker_fallback)
+    reranker_fallback_rate = (
+        reranker_fallback_count / len(all_results) if all_results else None
     )
 
     recommend_enable, recommendation_reasons = _evaluate_recommendation(
@@ -565,6 +635,7 @@ def run_reranking_evaluation(
         len(regressed_case_ids),
         decision_invariance,
         reranker_model,
+        reranker_fallback_count=reranker_fallback_count,
     )
 
     return RerankingRun(
@@ -592,6 +663,10 @@ def run_reranking_evaluation(
         regressed_case_ids=regressed_case_ids,
         unchanged_case_ids=unchanged_case_ids,
         decision_invariance_passed=decision_invariance,
+        decision_invariance_inconsistent_case_ids=inconsistent_case_ids,
+        reranker_applied_count=reranker_applied_count,
+        reranker_fallback_count=reranker_fallback_count,
+        reranker_fallback_rate=reranker_fallback_rate,
         recommend_enable=recommend_enable,
         recommendation_reasons=recommendation_reasons,
         latency_records=tuple(latency_records),

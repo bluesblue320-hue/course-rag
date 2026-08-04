@@ -1,5 +1,7 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 import os
+import json
 from pathlib import Path
 
 import numpy as np
@@ -135,6 +137,7 @@ def test_app_builds_index_once_and_health_reports_chunk_count(
         "reranker_enabled": False,
         "reranker_ready": False,
         "reranker_model": None,
+        "reranker_status": "disabled",
     }
     assert second_response.status_code == 200
     assert FakeEmbeddingService.init_count == 1
@@ -199,6 +202,7 @@ def test_app_starts_without_llm_and_keeps_retrieval_available(
         "reranker_enabled": False,
         "reranker_ready": False,
         "reranker_model": None,
+        "reranker_status": "disabled",
     }
     assert search_response.status_code == 200
     assert ask_response.status_code == 503
@@ -609,6 +613,7 @@ def test_invalid_rag_configuration_keeps_search_available_and_closes_generation(
             "reranker_enabled": False,
             "reranker_ready": False,
             "reranker_model": None,
+            "reranker_status": "disabled",
         }
         assert search_response.status_code == 200
         assert ask_response.status_code == 503
@@ -687,3 +692,136 @@ def test_dotenv_and_generation_are_initialized_before_threshold_resolution(
         pass
 
     assert events == ["dotenv", "generation", "threshold"]
+
+
+# ---------------------------------------------------------------------------
+# Reranker status in /health (Fix 6)
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _build_reranker_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    env: dict[str, str],
+    build_reranker_override: object | None = None,
+) -> "Iterator[TestClient]":  # type: ignore[name-defined]
+    FakeEmbeddingService.init_count = 0
+    FakeEmbeddingService.document_encode_count = 0
+    FakeEmbeddingService.queries = []
+    FakeGenerationService.init_count = 0
+    FakeGenerationService.close_count = 0
+    FakeGenerationService.prompts = []
+
+    knowledge_file = tmp_path / "knowledge.txt"
+    knowledge_file.write_text("A" * 900, encoding="utf-8")
+
+    monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
+    monkeypatch.setattr(api_module, "EmbeddingService", FakeEmbeddingService)
+    monkeypatch.setattr(api_module, "GenerationService", FakeGenerationService)
+    monkeypatch.setattr(
+        api_module,
+        "load_dotenv",
+        lambda *, dotenv_path, override: None,
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    if build_reranker_override is not None:
+        monkeypatch.setattr(
+            api_module, "build_reranker", build_reranker_override
+        )
+
+    with TestClient(api_module.app) as test_client:
+        yield test_client
+
+
+class TestRerankerHealthStatus:
+    def test_disabled_status(self, tmp_path, monkeypatch) -> None:
+        with _build_reranker_client(
+            tmp_path, monkeypatch, env={"RAG_RERANKER_ENABLED": "false"}
+        ) as client:
+            body = client.get("/health").json()
+        assert body["reranker_enabled"] is False
+        assert body["reranker_ready"] is False
+        assert body["reranker_status"] == "disabled"
+        assert body["reranker_model"] is None
+
+    def test_enabled_ready_status(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        def fake_build(config):
+            return FakeReranker()
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=fake_build,
+        ) as client:
+            body = client.get("/health").json()
+            search = client.post("/search", json={"query": "课程问题"})
+            ask = client.post("/ask", json={"question": "课程问题"})
+
+        assert body["reranker_enabled"] is True
+        assert body["reranker_ready"] is True
+        assert body["reranker_status"] == "ready"
+        assert body["reranker_model"] == "local-zh-model"
+        assert search.status_code == 200
+        assert ask.status_code == 200
+
+    def test_enabled_load_failed_status(self, tmp_path, monkeypatch) -> None:
+        def failing_build(config):
+            raise RuntimeError(
+                "model not found at C:\\secret\\cache\\local-zh-model"
+            )
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=failing_build,
+        ) as client:
+            body = client.get("/health").json()
+            search = client.post("/search", json={"query": "课程问题"})
+            ask = client.post("/ask", json={"question": "课程问题"})
+
+        # Enabled but model load failed -> load_failed, not disabled.
+        assert body["reranker_enabled"] is True
+        assert body["reranker_ready"] is False
+        assert body["reranker_status"] == "load_failed"
+        assert body["reranker_model"] == "local-zh-model"
+        # No internal path / stack must leak into the health payload.
+        assert "C:" not in json.dumps(body, ensure_ascii=False)
+        assert "Traceback" not in json.dumps(body, ensure_ascii=False)
+        # Search and ask must still work via vector-only.
+        assert search.status_code == 200
+        assert ask.status_code == 200
+
+    def test_config_invalid_status(self, tmp_path, monkeypatch) -> None:
+        # Enabled but empty model name -> config resolution fails.
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "",
+            },
+        ) as client:
+            body = client.get("/health").json()
+
+        assert body["reranker_status"] == "config_invalid"
+        assert body["reranker_ready"] is False
+        assert body["reranker_model"] is None

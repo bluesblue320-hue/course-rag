@@ -31,6 +31,7 @@ from src.exceptions import (
     GenerationConfigurationError,
     GenerationError,
     RagConfigurationError,
+    RagError,
     UnsupportedDocumentTypeError,
     UploadConfigurationError,
     UploadTooLargeError,
@@ -145,34 +146,46 @@ def initialize_search(app: FastAPI) -> None:
     app.state.retrieval_ready = True
 
     # Build optional reranker (disabled by default; safe degradation on failure)
-    reranker_config: RerankerConfig | None = None
+    # Config resolution and model loading are kept separate so that a load
+    # failure can be reported as `load_failed` instead of silently appearing
+    # as "not enabled".  The health endpoint never leaks paths, stacks, or
+    # internal exception text.
     reranker_instance = None
     retrieval_service: RetrievalService | None = None
     reranker_enabled = False
     reranker_ready = False
     reranker_model_name: str | None = None
+    reranker_status = "disabled"
+
     try:
         reranker_config = resolve_reranker_config(final_top_k=3)
-        if reranker_config.enabled:
-            reranker_instance = build_reranker(reranker_config)
-            retrieval_service = RetrievalService(
-                retriever=index,
-                config=reranker_config,
-                reranker=reranker_instance,
-            )
-            reranker_enabled = True
-            reranker_ready = retrieval_service.reranker_ready
-            reranker_model_name = retrieval_service.reranker_model
-    except Exception:
-        # Reranker config or model load failed; proceed without it.
-        reranker_config = None
-        reranker_instance = None
-        retrieval_service = None
+    except (ValueError, RagError):
+        reranker_status = "config_invalid"
+    else:
+        reranker_enabled = reranker_config.enabled
+        reranker_model_name = reranker_config.model_name or None
+        if not reranker_config.enabled:
+            reranker_status = "disabled"
+        else:
+            try:
+                reranker_instance = build_reranker(reranker_config)
+                retrieval_service = RetrievalService(
+                    retriever=index,
+                    config=reranker_config,
+                    reranker=reranker_instance,
+                )
+                reranker_ready = retrieval_service.reranker_ready
+                reranker_status = "ready" if reranker_ready else "load_failed"
+            except Exception:
+                # Model present in config but could not be loaded (missing,
+                # corrupt, offline-only miss, etc.).  Keep vector-only path.
+                reranker_status = "load_failed"
 
     app.state.retrieval_service = retrieval_service
     app.state.reranker_enabled = reranker_enabled
     app.state.reranker_ready = reranker_ready
     app.state.reranker_model = reranker_model_name
+    app.state.reranker_status = reranker_status
 
     app.state.generation_service = None
     app.state.rag_service = None
@@ -237,6 +250,7 @@ class HealthResponse(BaseModel):
     reranker_enabled: bool = False
     reranker_ready: bool = False
     reranker_model: str | None = None
+    reranker_status: str = "disabled"
 
 
 class SearchRequest(BaseModel):
@@ -559,6 +573,7 @@ def health(request: Request) -> HealthResponse:
         reranker_enabled=getattr(request.app.state, "reranker_enabled", False),
         reranker_ready=getattr(request.app.state, "reranker_ready", False),
         reranker_model=getattr(request.app.state, "reranker_model", None),
+        reranker_status=getattr(request.app.state, "reranker_status", "disabled"),
     )
 
 

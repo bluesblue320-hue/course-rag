@@ -9,7 +9,13 @@ the repository root::
       --dataset eval/dataset.jsonl \\
       --candidate-top-k 15 \\
       --final-top-k 5 \\
-      --reranker-model "cross-encoder/ms-marco-MiniLM-L-6-v2"
+      --reranker-model "<本地缓存的中文或多语言 CrossEncoder 模型>"
+
+重要：Reranker 模型必须与语料语言匹配。本项目语料为中文，不应默认使用英文
+MS MARCO 模型。模型必须提前下载并存在于本地缓存或本地目录；评估默认以
+``local_files_only`` 方式加载，不会自动联网下载。真实 baseline 必须记录完整
+模型名称（推荐同时记录 model revision）；没有合适的本地模型时，保持指标为
+``N/A``，不得使用 FakeReranker 结果冒充真实效果。
 """
 
 from __future__ import annotations
@@ -39,7 +45,6 @@ from src.rag_service import DEFAULT_MIN_RELEVANCE_SCORE
 from src.reranker import (
     DEFAULT_CANDIDATE_TOP_K,
     MAX_CANDIDATE_TOP_K,
-    MIN_CANDIDATE_TOP_K,
 )
 
 DEFAULT_MANIFEST = "eval/corpus_manifest.json"
@@ -90,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--candidate-top-k",
         type=int,
         default=DEFAULT_CANDIDATE_TOP_K,
-        help=f"向量检索候选池大小（最小 {MIN_CANDIDATE_TOP_K}，最大 {MAX_CANDIDATE_TOP_K}）",
+        help="向量检索候选池大小（A/B 评估要求 >= 15，以保证 Candidate Hit@15 语义）",
     )
     parser.add_argument(
         "--final-top-k",
@@ -106,7 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reranker-model",
         default=None,
-        help="CrossEncoder Reranker 模型名称",
+        help=(
+            "已缓存到本地的 CrossEncoder 模型名称（必须与语料语言匹配；"
+            "本项目中文语料应使用中文或多语言模型，不要用英文 MS MARCO 模型）"
+        ),
     )
     parser.add_argument(
         "--comparison-threshold",
@@ -164,10 +172,10 @@ def default_reranker_factory(model_name: str) -> object:
 def _validate_args(args: argparse.Namespace) -> list[str]:
     """Validate CLI arguments.  Returns a list of error messages."""
     errors: list[str] = []
-    if args.candidate_top_k < MIN_CANDIDATE_TOP_K:
-        errors.append(
-            f"--candidate-top-k 不能小于 {MIN_CANDIDATE_TOP_K}"
-        )
+    # The A/B evaluation reports Candidate Hit@15 / Recall@15 metrics that are
+    # only correct when the candidate pool is >= 15 wide.
+    if args.candidate_top_k < 15:
+        errors.append("--candidate-top-k 必须大于等于 15（A/B 评估使用的 Candidate Hit@15 基于 Top-15）")
     if args.candidate_top_k > MAX_CANDIDATE_TOP_K:
         errors.append(
             f"--candidate-top-k 不能大于 {MAX_CANDIDATE_TOP_K}"
@@ -177,7 +185,7 @@ def _validate_args(args: argparse.Namespace) -> list[str]:
     if args.candidate_top_k < args.final_top_k:
         errors.append("--candidate-top-k 必须大于等于 --final-top-k")
     if not args.reranker_model:
-        errors.append("--reranker-model 不能为空")
+        errors.append("--reranker-model 不能为空（必须是已缓存到本地的模型）")
     return errors
 
 
@@ -211,6 +219,8 @@ def _print_summary(run, output_dir: Path, root: Path) -> None:
         "",
         f"  改善案例         : {len(run.improved_case_ids)}",
         f"  退化案例         : {len(run.regressed_case_ids)}",
+        f"  Reranker 应用数  : {run.reranker_applied_count}",
+        f"  Reranker 回退数  : {run.reranker_fallback_count}",
         f"  决策一致性       : {'通过' if run.decision_invariance_passed else '未通过'}",
         f"  建议启用         : {'是' if run.recommend_enable else '否'}",
         "",

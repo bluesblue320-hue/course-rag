@@ -10,6 +10,9 @@ Design rules enforced here:
 
 * ``CrossEncoder`` is imported lazily so ``--help``, tests, and disabled
   mode never pay the model-loading cost.
+* Model loading is **offline only** (``local_files_only=True``): a model that
+  is not already cached locally fails clearly instead of silently downloading
+  from the network.  This keeps the project's offline / air-gapped posture.
 * Scores are validated as finite floats; ``NaN`` / ``Infinity`` / non-numeric
   values cause the caller to fall back to vector-only ordering.
 * The protocol guarantees every input candidate is returned exactly once.
@@ -246,7 +249,10 @@ class CrossEncoderReranker:
             ) from exc
 
         self._model_name = model_name
-        self._model = CrossEncoder(model_name)
+        # Offline-only loading: if the model is not already cached locally,
+        # sentence-transformers must fail loudly instead of reaching out to
+        # Hugging Face.  This is a hard security/offline requirement.
+        self._model = CrossEncoder(model_name, local_files_only=True)
 
     @property
     def model_name(self) -> str:

@@ -68,6 +68,24 @@ def _round(value: float | None, digits: int = 6) -> float | None:
     return round(float(value), digits)
 
 
+def _csv_optional_number(value: float | None) -> str | float:
+    """Serialize an optional float metric for CSV without dropping 0.0.
+
+    ``None`` becomes an empty cell; ``0.0`` stays ``0.0`` (the previous
+    ``value or ""`` idiom wrongly turned a legitimate ``0.0`` into blank).
+    """
+    if value is None:
+        return ""
+    return round(float(value), 6)
+
+
+def _csv_optional_int(value: int | None) -> str | int:
+    """Serialize an optional int metric for CSV without dropping 0."""
+    if value is None:
+        return ""
+    return int(value)
+
+
 def _branch_metrics_payload(metrics: BranchMetrics) -> dict[str, object]:
     return {
         "case_count": metrics.case_count,
@@ -213,11 +231,19 @@ def _build_summary(run: RerankingRun) -> dict[str, object]:
         "improved_case_ids": list(run.improved_case_ids),
         "regressed_case_ids": list(run.regressed_case_ids),
         "unchanged_case_ids": list(run.unchanged_case_ids),
+        "reranker_applied_count": run.reranker_applied_count,
+        "reranker_fallback_count": run.reranker_fallback_count,
+        "reranker_fallback_rate": _round(run.reranker_fallback_rate),
         "decision_invariance_check": {
             "passed": run.decision_invariance_passed,
+            "inconsistent_case_ids": list(
+                run.decision_invariance_inconsistent_case_ids
+            ),
             "note": (
-                "拒答决策基于 max_retrieval_score，vector-only 和 reranked "
-                "分支共享同一候选池，因此决策结果必然一致。"
+                "评估对每道题的 vector-only 与 reranked 分支拒答决策分别调用 "
+                "has_sufficient_context 执行真实断言检查（对比阈值与推荐阈值）。"
+                "当前生产实现设计上两分支共享候选池最高向量分数，决策应一致；"
+                "若任一阈值下两分支决策不一致，本检查会失败并阻止启用建议。"
             ),
         },
         "split_roles": [
@@ -285,41 +311,41 @@ def _write_cases_csv(run: RerankingRun, path: Path) -> None:
                 "answerable": r.answerable,
             }
             if r.candidate is not None:
-                row["candidate_first_relevant_rank"] = (
-                    r.candidate.first_relevant_rank or ""
+                row["candidate_first_relevant_rank"] = _csv_optional_int(
+                    r.candidate.first_relevant_rank
                 )
                 row["candidate_hit_at_5"] = r.candidate.hit_at_5
                 row["candidate_hit_at_10"] = r.candidate.hit_at_10
                 row["candidate_hit_at_15"] = r.candidate.hit_at_15
-                row["candidate_recall_at_5"] = _round(r.candidate.recall_at_5) or ""
-                row["candidate_recall_at_10"] = _round(r.candidate.recall_at_10) or ""
-                row["candidate_recall_at_15"] = _round(r.candidate.recall_at_15) or ""
+                row["candidate_recall_at_5"] = _csv_optional_number(r.candidate.recall_at_5)
+                row["candidate_recall_at_10"] = _csv_optional_number(r.candidate.recall_at_10)
+                row["candidate_recall_at_15"] = _csv_optional_number(r.candidate.recall_at_15)
             else:
                 for col in CASES_CSV_COLUMNS:
                     if col.startswith("candidate_"):
                         row[col] = ""
             if r.vector is not None:
-                row["vector_first_relevant_rank"] = (
-                    r.vector.first_relevant_rank or ""
+                row["vector_first_relevant_rank"] = _csv_optional_int(
+                    r.vector.first_relevant_rank
                 )
                 row["vector_hit_at_1"] = r.vector.hit_at_1
                 row["vector_hit_at_3"] = r.vector.hit_at_3
                 row["vector_hit_at_5"] = r.vector.hit_at_5
-                row["vector_recall_at_1"] = _round(r.vector.recall_at_1) or ""
-                row["vector_recall_at_3"] = _round(r.vector.recall_at_3) or ""
-                row["vector_recall_at_5"] = _round(r.vector.recall_at_5) or ""
-                row["vector_reciprocal_rank"] = _round(r.vector.reciprocal_rank) or ""
+                row["vector_recall_at_1"] = _csv_optional_number(r.vector.recall_at_1)
+                row["vector_recall_at_3"] = _csv_optional_number(r.vector.recall_at_3)
+                row["vector_recall_at_5"] = _csv_optional_number(r.vector.recall_at_5)
+                row["vector_reciprocal_rank"] = _csv_optional_number(r.vector.reciprocal_rank)
             if r.reranked is not None:
-                row["reranked_first_relevant_rank"] = (
-                    r.reranked.first_relevant_rank or ""
+                row["reranked_first_relevant_rank"] = _csv_optional_int(
+                    r.reranked.first_relevant_rank
                 )
                 row["reranked_hit_at_1"] = r.reranked.hit_at_1
                 row["reranked_hit_at_3"] = r.reranked.hit_at_3
                 row["reranked_hit_at_5"] = r.reranked.hit_at_5
-                row["reranked_recall_at_1"] = _round(r.reranked.recall_at_1) or ""
-                row["reranked_recall_at_3"] = _round(r.reranked.recall_at_3) or ""
-                row["reranked_recall_at_5"] = _round(r.reranked.recall_at_5) or ""
-                row["reranked_reciprocal_rank"] = _round(r.reranked.reciprocal_rank) or ""
+                row["reranked_recall_at_1"] = _csv_optional_number(r.reranked.recall_at_1)
+                row["reranked_recall_at_3"] = _csv_optional_number(r.reranked.recall_at_3)
+                row["reranked_recall_at_5"] = _csv_optional_number(r.reranked.recall_at_5)
+                row["reranked_reciprocal_rank"] = _csv_optional_number(r.reranked.reciprocal_rank)
             row["rank_change"] = r.rank_change if r.rank_change is not None else ""
             row["improved"] = r.improved
             row["regressed"] = r.regressed
@@ -554,7 +580,31 @@ def _write_report_md(run: RerankingRun, path: Path) -> None:
     lines.append(
         f"- 决策一致性检查: {'通过' if run.decision_invariance_passed else '未通过'}"
     )
-    lines.append("- 拒答基于 max_retrieval_score，两个分支共享同一候选池，决策必然一致。")
+    lines.append(
+        "- 对每个案例的 vector-only 与 reranked 分支分别调用生产函数 "
+        "has_sufficient_context 执行真实断言检查（对比阈值与推荐阈值）。"
+        "当前设计两分支共享候选池最高向量分数，预期一致；若任一阈值下不一致，"
+        "本检查会失败并阻止建议启用。"
+    )
+    if run.decision_invariance_inconsistent_case_ids:
+        lines.append(
+            f"- 不一致案例: {', '.join(run.decision_invariance_inconsistent_case_ids)}"
+        )
+    lines.append("")
+
+    # Reranker applied / fallback
+    lines.append("## Reranker 应用与回退")
+    lines.append("")
+    lines.append(f"- 应用 Reranker 的案例数: {run.reranker_applied_count}")
+    lines.append(f"- 发生回退的案例数: {run.reranker_fallback_count}")
+    lines.append(
+        f"- 回退率: {_fmt(run.reranker_fallback_rate)}"
+    )
+    if run.reranker_fallback_count > 0:
+        lines.append(
+            "- 存在回退：该运行不能证明真实 Reranker 的完整质量，"
+            "回退后的 vector-only 结果仅用于验证程序安全，不计入成功 reranking 的应用率。"
+        )
     lines.append("")
 
     # Latency

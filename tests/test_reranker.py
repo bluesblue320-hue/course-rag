@@ -366,3 +366,43 @@ class TestCrossEncoderRerankerImport:
         """The conftest stub raises AssertionError; the reranker must propagate it."""
         with pytest.raises((AssertionError, RuntimeError)):
             CrossEncoderReranker("fake-model")
+
+    def test_construction_passes_local_files_only(self, monkeypatch) -> None:
+        """CrossEncoder must be loaded with local_files_only=True (no network)."""
+        import sentence_transformers
+
+        captured: dict[str, object] = {}
+
+        class _RecordingCrossEncoder:
+            def __init__(self, model_name: str, **kwargs: object) -> None:
+                captured["model_name"] = model_name
+                captured.update(kwargs)
+
+        monkeypatch.setattr(
+            sentence_transformers, "CrossEncoder", _RecordingCrossEncoder
+        )
+
+        CrossEncoderReranker("local-zh-model")
+
+        assert captured.get("model_name") == "local-zh-model"
+        assert captured.get("local_files_only") is True
+
+    def test_construction_does_not_use_network_on_missing_model(
+        self, monkeypatch
+    ) -> None:
+        """A missing local model must fail without reaching the network."""
+        import sentence_transformers
+
+        class _OfflineOnlyCrossEncoder:
+            def __init__(self, model_name: str, **kwargs: object) -> None:
+                # Simulate HF offline failure; must NOT attempt a download.
+                if kwargs.get("local_files_only") is not True:
+                    raise AssertionError("network download would have been attempted")
+                raise FileNotFoundError(f"model not cached locally: {model_name}")
+
+        monkeypatch.setattr(
+            sentence_transformers, "CrossEncoder", _OfflineOnlyCrossEncoder
+        )
+
+        with pytest.raises(FileNotFoundError):
+            CrossEncoderReranker("not-cached-model")

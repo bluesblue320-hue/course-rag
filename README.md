@@ -324,13 +324,14 @@ python -m scripts.evaluate_rag
 
 ```env
 RAG_RERANKER_ENABLED=false
-RAG_RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+RAG_RERANKER_MODEL=<本地缓存的中文或多语言 CrossEncoder 模型>
 RAG_RERANKER_CANDIDATE_TOP_K=15
 ```
 
 - `RAG_RERANKER_ENABLED=false` 时行为与原来完全一致，不加载额外模型
 - 拒答决策仍基于 `retrieval_score`（向量相似度），不使用 `rerank_score`
 - Reranker 失败时安全回退到原始向量排序
+- **Reranker 模型必须与语料语言匹配**：本项目语料为中文，应使用中文或多语言 CrossEncoder 模型，**不要默认使用英文 MS MARCO 模型**（如 `cross-encoder/ms-marco-MiniLM-L-6-v2`）；模型必须提前下载并存在于本地缓存，以 `local_files_only` 方式加载，不会自动联网下载
 
 **A/B 评估**：
 
@@ -340,7 +341,7 @@ python -m scripts.evaluate_reranker `
   --dataset eval/dataset.jsonl `
   --candidate-top-k 15 `
   --final-top-k 5 `
-  --reranker-model "cross-encoder/ms-marco-MiniLM-L-6-v2" `
+  --reranker-model "<本地缓存的中文或多语言 CrossEncoder 模型>" `
   --output-dir reports/generated/reranking
 ```
 

@@ -79,6 +79,27 @@ class RerankingCaseResult:
 
 
 @dataclass(frozen=True)
+class DecisionInvarianceResult:
+    """Result of checking refusal-decision invariance for one case (or aggregate).
+
+    The refusal decision is computed from ``has_sufficient_context`` over the
+    highest **vector** retrieval score of the shared candidate pool.  The check
+    is real: it computes the decision independently for the vector-only and
+    reranked views at both the comparison and recommended thresholds and fails
+    when they disagree.  (In the current design the two views share the same
+    ``max_retrieval_score``, so they normally agree; the function is still
+    written to fail if that ever changes.)
+    """
+
+    passed: bool
+    inconsistent_case_ids: tuple[str, ...] = ()
+    vector_decision_at_comparison: bool | None = None
+    reranked_decision_at_comparison: bool | None = None
+    vector_decision_at_recommended: bool | None = None
+    reranked_decision_at_recommended: bool | None = None
+
+
+@dataclass(frozen=True)
 class LatencyRecord:
     """One timing sample for latency measurement."""
 
