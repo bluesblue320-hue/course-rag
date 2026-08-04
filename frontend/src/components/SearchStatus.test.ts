@@ -30,7 +30,15 @@ describe("SearchStatus", () => {
         indexed_chunks: 8,
         model: "MiniLM",
         results: [
-          { rank: 1, score: 0.8, chunk_index: 2, text: "service 层" },
+          {
+            rank: 1,
+            score: 0.8,
+            chunk_index: 2,
+            text: "service 层",
+            document_id: "builtin-knowledge",
+            filename: "knowledge.txt",
+            page_number: null,
+          },
         ],
       },
     }

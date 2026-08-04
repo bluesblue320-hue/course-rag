@@ -17,6 +17,9 @@ export const MOCK_ANSWERED_RESPONSE: AskResponse = {
       score: 0.8421,
       text: "Service 层负责核心业务逻辑，并协调数据访问流程。",
       chunk_index: 2,
+      document_id: "builtin-knowledge",
+      filename: "knowledge.txt",
+      page_number: null,
     },
   ],
 }

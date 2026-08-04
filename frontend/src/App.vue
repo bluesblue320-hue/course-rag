@@ -6,6 +6,7 @@ import AnswerSources from "./components/AnswerSources.vue"
 import AppSidebar from "./components/AppSidebar.vue"
 import AskStatus from "./components/AskStatus.vue"
 import IndexSummary from "./components/IndexSummary.vue"
+import KnowledgeBasePanel from "./components/KnowledgeBasePanel.vue"
 import QueryModeSwitch from "./components/QueryModeSwitch.vue"
 import RetrievalExplanation from "./components/RetrievalExplanation.vue"
 import SearchForm from "./components/SearchForm.vue"
@@ -45,19 +46,27 @@ const isBusy = computed(
   () => isSearchLoading.value || isAskLoading.value,
 )
 
-const pageCopy = computed(() =>
-  mode.value === "ask"
-    ? {
-        eyebrow: "RAG QUESTION ANSWERING",
-        title: "课程知识问答",
-        description: "根据课程资料生成带引用来源的回答。",
-      }
-    : {
-        eyebrow: "SEMANTIC RETRIEVAL",
-        title: "课程知识检索",
-        description: "输入问题，查看语义最相关的课程原文。",
-      },
-)
+const pageCopy = computed(() => {
+  if (mode.value === "ask") {
+    return {
+      eyebrow: "RAG QUESTION ANSWERING",
+      title: "课程知识问答",
+      description: "根据课程资料生成带引用来源的回答。",
+    }
+  }
+  if (mode.value === "documents") {
+    return {
+      eyebrow: "KNOWLEDGE BASE",
+      title: "知识库管理",
+      description: "上传、查看和删除课程资料，内容会立即参与检索与问答。",
+    }
+  }
+  return {
+    eyebrow: "SEMANTIC RETRIEVAL",
+    title: "课程知识检索",
+    description: "输入问题，查看语义最相关的课程原文。",
+  }
+})
 
 const responseMetadata = computed(() => {
   if (
@@ -102,6 +111,7 @@ async function submitQuestion(question: string): Promise<void> {
 
       <QueryModeSwitch v-model="mode" :disabled="isBusy" />
       <SearchForm
+        v-show="mode !== 'documents'"
         :mode="mode"
         :loading="isBusy"
         @submit="submitQuestion"
@@ -117,10 +127,11 @@ async function submitQuestion(question: string): Promise<void> {
           />
         </template>
       </template>
-      <template v-else>
+      <template v-else-if="mode === 'search'">
         <SearchStatus :state="searchState" @retry="retrySearch" />
         <SearchResults :state="searchState" />
       </template>
+      <KnowledgeBasePanel v-else />
     </main>
 
     <aside class="context-panel" aria-label="索引与检索说明">

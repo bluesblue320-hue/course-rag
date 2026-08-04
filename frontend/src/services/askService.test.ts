@@ -12,6 +12,9 @@ const validSource = {
   score: 0.8421,
   text: "Service 层负责核心业务逻辑。",
   chunk_index: 2,
+  document_id: "builtin-knowledge",
+  filename: "knowledge.txt",
+  page_number: null,
 }
 
 const validResponse = {
@@ -73,6 +76,19 @@ describe("AskService runtime guards", () => {
 
   it("rejects a fractional chunk index", () => {
     expect(isAskSource({ ...validSource, chunk_index: 1.5 })).toBe(false)
+  })
+
+  it("rejects missing source document metadata", () => {
+    const { document_id: _id, ...withoutId } = validSource
+    const { filename: _filename, ...withoutFilename } = validSource
+    expect(isAskSource(withoutId)).toBe(false)
+    expect(isAskSource(withoutFilename)).toBe(false)
+  })
+
+  it("rejects an invalid source page number", () => {
+    expect(isAskSource({ ...validSource, page_number: 0 })).toBe(false)
+    expect(isAskSource({ ...validSource, page_number: "12" })).toBe(false)
+    expect(isAskSource({ ...validSource, page_number: undefined })).toBe(false)
   })
 
   it("rejects string, non-finite, and negative timings", () => {

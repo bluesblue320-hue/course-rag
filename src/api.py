@@ -1,48 +1,141 @@
-"""Expose semantic retrieval through a minimal FastAPI application."""
+"""Expose semantic retrieval, document management, and RAG answering."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from src.chunker import split_text
+from src.document_chunker import chunk_document
+from src.document_loaders import (
+    MarkdownDocumentLoader,
+    PdfDocumentLoader,
+    TextDocumentLoader,
+)
+from src.document_repository import DocumentRepository
+from src.documents import DocumentRecord
 from src.embedding import EmbeddingService
 from src.exceptions import (
+    BuiltinDocumentDeletionError,
+    DocumentIngestionError,
+    DocumentMetadataError,
+    DocumentNotFoundError,
+    DocumentParseError,
+    EmptyDocumentError,
     GenerationConfigurationError,
     GenerationError,
     RagConfigurationError,
+    UnsupportedDocumentTypeError,
+    UploadConfigurationError,
+    UploadTooLargeError,
 )
 from src.generation import GenerationService
-from src.loader import load_text
+from src.ingestion_service import (
+    DEFAULT_MAX_UPLOAD_BYTES,
+    IngestionService,
+    resolve_max_upload_bytes,
+)
+from src.knowledge_index import KnowledgeIndex
 from src.prompt_builder import PromptBuilder
 from src.rag_service import (
     RagService,
     resolve_min_relevance_score,
 )
-from src.retriever import SemanticRetriever
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_PATH = PROJECT_ROOT / "data" / "knowledge.txt"
+RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
+UPLOAD_DIR = RUNTIME_DIR / "uploads"
+METADATA_PATH = RUNTIME_DIR / "documents.json"
+BUILTIN_DOCUMENT_ID = "builtin-knowledge"
+BUILTIN_FILENAME = "knowledge.txt"
+
+
+def _file_mtime_iso(path: Path) -> str:
+    """Return a file's modification time as a UTC ISO 8601 string."""
+    modified_at = datetime.fromtimestamp(
+        path.stat().st_mtime,
+        tz=timezone.utc,
+    )
+    return modified_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _build_ingestion_dependencies(
+    embedding_service: EmbeddingService,
+    max_upload_bytes: int,
+) -> tuple[IngestionService, DocumentRecord]:
+    """Build the document repository, upload store, and initial index."""
+    loader = TextDocumentLoader()
+    builtin_loaded = loader.load(KNOWLEDGE_PATH)
+    builtin_document = DocumentRecord(
+        document_id=BUILTIN_DOCUMENT_ID,
+        original_filename=BUILTIN_FILENAME,
+        stored_filename=None,
+        content_type="text/plain",
+        size_bytes=KNOWLEDGE_PATH.stat().st_size,
+        text_length=builtin_loaded.text_length,
+        chunk_count=len(
+            chunk_document(
+                builtin_loaded,
+                BUILTIN_DOCUMENT_ID,
+                BUILTIN_FILENAME,
+            )
+        ),
+        created_at=_file_mtime_iso(KNOWLEDGE_PATH),
+        is_builtin=True,
+    )
+
+    repository = DocumentRepository(METADATA_PATH)
+    index = KnowledgeIndex()
+    ingestion_service = IngestionService(
+        embedding_service=embedding_service,
+        repository=repository,
+        index=index,
+        upload_dir=UPLOAD_DIR,
+        builtin_document=builtin_document,
+        builtin_path=KNOWLEDGE_PATH,
+        loaders={
+            ".txt": TextDocumentLoader(),
+            ".md": MarkdownDocumentLoader(),
+            ".pdf": PdfDocumentLoader(),
+        },
+        max_upload_bytes=max_upload_bytes,
+    )
+
+    valid_uploads = ingestion_service.reconcile_persisted_documents()
+    ingestion_service.initialize_index([builtin_document, *valid_uploads])
+    return ingestion_service, builtin_document
 
 
 def initialize_search(app: FastAPI) -> None:
-    """Build retrieval dependencies and optionally enable answer generation."""
-    text = load_text(str(KNOWLEDGE_PATH))
-    chunks = split_text(text)
+    """Build retrieval, document, and optional generation dependencies."""
+    load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
+
+    try:
+        max_upload_bytes = resolve_max_upload_bytes()
+    except UploadConfigurationError as exc:
+        app.state.upload_configuration_error = exc
+        max_upload_bytes = DEFAULT_MAX_UPLOAD_BYTES
+    else:
+        app.state.upload_configuration_error = None
+
     embedding_service = EmbeddingService()
-    document_embeddings = embedding_service.encode_documents(chunks)
-    retriever = SemanticRetriever(chunks, document_embeddings)
-    prompt_builder = PromptBuilder()
+    ingestion_service, _builtin_document = _build_ingestion_dependencies(
+        embedding_service,
+        max_upload_bytes,
+    )
+    index = ingestion_service.index
 
     app.state.embedding_service = embedding_service
-    app.state.retriever = retriever
-    app.state.chunk_count = len(chunks)
+    app.state.ingestion_service = ingestion_service
+    app.state.knowledge_index = index
+    app.state.chunk_count = index.chunk_count
     app.state.model_name = embedding_service.model_name
     app.state.retrieval_ready = True
 
@@ -54,8 +147,6 @@ def initialize_search(app: FastAPI) -> None:
     app.state.generation_configuration_error = None
     app.state.rag_configuration_error = None
     app.state.min_relevance_score = None
-
-    load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
     try:
         generation_service = GenerationService()
@@ -69,8 +160,8 @@ def initialize_search(app: FastAPI) -> None:
             min_relevance_score = resolve_min_relevance_score()
             rag_service = RagService(
                 embedding_service=embedding_service,
-                retriever=retriever,
-                prompt_builder=prompt_builder,
+                retriever=index,
+                prompt_builder=PromptBuilder(),
                 generation_service=generation_service,
                 min_relevance_score=min_relevance_score,
             )
@@ -126,12 +217,15 @@ class SearchRequest(BaseModel):
 
 
 class SearchResultResponse(BaseModel):
-    """Describe one ranked source chunk."""
+    """Describe one ranked source chunk with document metadata."""
 
     rank: int
     score: float
     text: str
     chunk_index: int
+    document_id: str
+    filename: str
+    page_number: int | None
 
 
 class SearchResponse(BaseModel):
@@ -169,6 +263,9 @@ class AskSourceResponse(BaseModel):
     score: float
     text: str
     chunk_index: int
+    document_id: str
+    filename: str
+    page_number: int | None
 
 
 class AskResponse(BaseModel):
@@ -185,6 +282,37 @@ class AskResponse(BaseModel):
     embedding_model: str
     llm_model: str
     sources: list[AskSourceResponse]
+
+
+class DocumentResponse(BaseModel):
+    """Describe one managed knowledge document."""
+
+    document_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    text_length: int
+    chunk_count: int
+    created_at: str
+    is_builtin: bool
+    index_status: Literal["ready"] = "ready"
+
+
+class DocumentListResponse(BaseModel):
+    """Return the managed document list and index totals."""
+
+    documents: list[DocumentResponse]
+    document_count: int
+    chunk_count: int
+
+
+class DeleteDocumentResponse(BaseModel):
+    """Report one successful document deletion."""
+
+    document_id: str
+    deleted: bool
+    document_count: int
+    chunk_count: int
 
 
 app = FastAPI(
@@ -238,6 +366,141 @@ async def handle_rag_configuration_error(
     )
 
 
+@app.exception_handler(UploadConfigurationError)
+async def handle_upload_configuration_error(
+    _request: Request,
+    _error: UploadConfigurationError,
+) -> JSONResponse:
+    """Report an invalid upload limit without exposing raw values."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "UPLOAD_NOT_CONFIGURED",
+            "message": "文档上传配置无效",
+        },
+    )
+
+
+@app.exception_handler(UnsupportedDocumentTypeError)
+async def handle_unsupported_document_type(
+    _request: Request,
+    _error: UnsupportedDocumentTypeError,
+) -> JSONResponse:
+    """Reject unsupported upload types with a stable public message."""
+    return JSONResponse(
+        status_code=415,
+        content={
+            "code": "UNSUPPORTED_DOCUMENT_TYPE",
+            "message": "仅支持 .txt、.md 和文本型 .pdf 文件",
+        },
+    )
+
+
+@app.exception_handler(EmptyDocumentError)
+async def handle_empty_document(
+    _request: Request,
+    _error: EmptyDocumentError,
+) -> JSONResponse:
+    """Reject empty uploads with a stable public message."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "EMPTY_DOCUMENT",
+            "message": "文档内容为空",
+        },
+    )
+
+
+@app.exception_handler(DocumentParseError)
+async def handle_document_parse_error(
+    _request: Request,
+    _error: DocumentParseError,
+) -> JSONResponse:
+    """Report unparseable uploads without exposing internal details."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "DOCUMENT_PARSE_FAILED",
+            "message": "文档解析失败，请确认文件内容有效",
+        },
+    )
+
+
+@app.exception_handler(UploadTooLargeError)
+async def handle_upload_too_large(
+    _request: Request,
+    _error: UploadTooLargeError,
+) -> JSONResponse:
+    """Reject oversized uploads with a stable public message."""
+    return JSONResponse(
+        status_code=413,
+        content={
+            "code": "UPLOAD_TOO_LARGE",
+            "message": "文件超过上传大小限制",
+        },
+    )
+
+
+@app.exception_handler(DocumentNotFoundError)
+async def handle_document_not_found(
+    _request: Request,
+    _error: DocumentNotFoundError,
+) -> JSONResponse:
+    """Report a missing document id."""
+    return JSONResponse(
+        status_code=404,
+        content={
+            "code": "DOCUMENT_NOT_FOUND",
+            "message": "文档不存在",
+        },
+    )
+
+
+@app.exception_handler(BuiltinDocumentDeletionError)
+async def handle_builtin_document_deletion(
+    _request: Request,
+    _error: BuiltinDocumentDeletionError,
+) -> JSONResponse:
+    """Reject deletion of the built-in knowledge document."""
+    return JSONResponse(
+        status_code=409,
+        content={
+            "code": "BUILTIN_DOCUMENT_CANNOT_BE_DELETED",
+            "message": "内置文档不能删除",
+        },
+    )
+
+
+@app.exception_handler(DocumentMetadataError)
+async def handle_document_metadata_error(
+    _request: Request,
+    _error: DocumentMetadataError,
+) -> JSONResponse:
+    """Report metadata store failures without exposing internal details."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "code": "DOCUMENT_INGESTION_FAILED",
+            "message": "文档处理失败，请稍后重试",
+        },
+    )
+
+
+@app.exception_handler(DocumentIngestionError)
+async def handle_document_ingestion_error(
+    _request: Request,
+    _error: DocumentIngestionError,
+) -> JSONResponse:
+    """Report failed ingestion or deletion without exposing internal paths."""
+    return JSONResponse(
+        status_code=500,
+        content={
+            "code": "DOCUMENT_INGESTION_FAILED",
+            "message": "文档处理失败，请稍后重试",
+        },
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 def health(request: Request) -> HealthResponse:
     """Return readiness for retrieval and answer generation."""
@@ -258,7 +521,7 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
     query_embedding = request.app.state.embedding_service.encode_query(
         payload.query
     )
-    results = request.app.state.retriever.search(
+    results = request.app.state.knowledge_index.search(
         query_embedding,
         top_k=payload.top_k,
     )
@@ -292,4 +555,89 @@ def ask(payload: AskRequest, request: Request) -> AskResponse:
             "embedding_model": request.app.state.model_name,
             "llm_model": request.app.state.llm_model_name,
         }
+    )
+
+
+def _document_response(record: DocumentRecord) -> DocumentResponse:
+    return DocumentResponse(
+        document_id=record.document_id,
+        filename=record.original_filename,
+        content_type=record.content_type,
+        size_bytes=record.size_bytes,
+        text_length=record.text_length,
+        chunk_count=record.chunk_count,
+        created_at=record.created_at,
+        is_builtin=record.is_builtin,
+    )
+
+
+@app.get("/documents", response_model=DocumentListResponse)
+def list_documents(request: Request) -> DocumentListResponse:
+    """Return the unified document list and current index totals."""
+    documents = request.app.state.ingestion_service.list_documents()
+    return DocumentListResponse(
+        documents=[_document_response(record) for record in documents],
+        document_count=len(documents),
+        chunk_count=request.app.state.knowledge_index.chunk_count,
+    )
+
+
+def read_upload_with_limit(
+    upload: UploadFile,
+    max_bytes: int,
+) -> bytes:
+    """Read at most max_bytes + 1 bytes so oversized uploads stay bounded."""
+    data = upload.file.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise UploadTooLargeError("文件超过上传大小限制")
+    return data
+
+
+@app.post(
+    "/documents",
+    response_model=DocumentResponse,
+    status_code=201,
+)
+def upload_document(
+    request: Request,
+    file: UploadFile = File(...),
+) -> DocumentResponse:
+    """Validate, store, and index one uploaded knowledge document."""
+    upload_configuration_error = request.app.state.upload_configuration_error
+    if upload_configuration_error is not None:
+        raise upload_configuration_error
+
+    ingestion_service = request.app.state.ingestion_service
+    data = read_upload_with_limit(
+        file,
+        ingestion_service.max_upload_bytes,
+    )
+    record = ingestion_service.ingest(
+        file.filename or "",
+        file.content_type or "",
+        data,
+    )
+    request.app.state.chunk_count = request.app.state.knowledge_index.chunk_count
+    return _document_response(record)
+
+
+@app.delete(
+    "/documents/{document_id}",
+    response_model=DeleteDocumentResponse,
+)
+def delete_document(
+    document_id: str,
+    request: Request,
+) -> DeleteDocumentResponse:
+    """Delete one uploaded document and rebuild the active index."""
+    request.app.state.ingestion_service.delete_document(document_id)
+    chunk_count = request.app.state.knowledge_index.chunk_count
+    request.app.state.chunk_count = chunk_count
+    return DeleteDocumentResponse(
+        document_id=document_id,
+        deleted=True,
+        document_count=len(
+            request.app.state.ingestion_service.list_documents()
+        ),
+        chunk_count=chunk_count,
     )

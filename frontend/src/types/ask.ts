@@ -10,6 +10,9 @@ export interface AskSource {
   score: number
   text: string
   chunk_index: number
+  document_id: string
+  filename: string
+  page_number: number | null
 }
 
 export interface AskResponse {

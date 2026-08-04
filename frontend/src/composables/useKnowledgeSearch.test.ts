@@ -15,6 +15,9 @@ const successResponse: SearchResponse = {
       score: 0.8421,
       chunk_index: 2,
       text: "service 层负责业务逻辑。",
+      document_id: "builtin-knowledge",
+      filename: "knowledge.txt",
+      page_number: null,
     },
   ],
 }

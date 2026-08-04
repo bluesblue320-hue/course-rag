@@ -38,3 +38,6 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 coverage/
+
+# Runtime document uploads and metadata
+data/runtime/

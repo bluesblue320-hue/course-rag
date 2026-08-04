@@ -22,12 +22,18 @@ const successState: SearchState = {
         score: 0.8421,
         chunk_index: 2,
         text: "service 层负责业务逻辑。",
+        document_id: "builtin-knowledge",
+        filename: "knowledge.txt",
+        page_number: null,
       },
       {
         rank: 2,
         score: 0.7168,
         chunk_index: 1,
         text: "router 层接收 HTTP 请求。",
+        document_id: "builtin-knowledge",
+        filename: "knowledge.txt",
+        page_number: null,
       },
     ],
   },
@@ -63,14 +69,12 @@ describe("SearchResults", () => {
   })
 
   it("renders an empty-result message", () => {
+    const response = { ...successState.response, results: [] }
     const wrapper = mount(SearchResults, {
       props: {
         state: {
           status: "empty",
-          response: {
-            ...successState.response,
-            results: [],
-          },
+          response,
         },
       },
     })
@@ -80,14 +84,12 @@ describe("SearchResults", () => {
   })
 
   it("keeps empty-result guidance out of a live region", () => {
+    const response = { ...successState.response, results: [] }
     const wrapper = mount(SearchResults, {
       props: {
         state: {
           status: "empty",
-          response: {
-            ...successState.response,
-            results: [],
-          },
+          response,
         },
       },
     })

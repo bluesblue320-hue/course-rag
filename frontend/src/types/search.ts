@@ -8,6 +8,9 @@ export interface SearchResult {
   score: number
   chunk_index: number
   text: string
+  document_id: string
+  filename: string
+  page_number: number | null
 }
 
 export interface SearchResponse {
