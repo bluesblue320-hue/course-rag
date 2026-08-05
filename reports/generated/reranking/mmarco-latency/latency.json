@@ -1,0 +1,21 @@
+{
+  "vector_retrieval_ms": {
+    "count": 60,
+    "mean": 42.5473,
+    "median": 48.2679,
+    "p95": 79.0036
+  },
+  "rerank_ms": {
+    "count": 60,
+    "mean": 4111.72,
+    "median": 5590.5645,
+    "p95": 7226.0202
+  },
+  "end_to_end_ms": {
+    "count": 60,
+    "mean": 4154.2674,
+    "median": 5628.9939,
+    "p95": 7291.539
+  },
+  "note": "延迟数据依赖设备和运行环境，不写入确定性质量 baseline。"
+}

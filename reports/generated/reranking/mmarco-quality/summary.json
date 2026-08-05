@@ -1,0 +1,415 @@
+{
+  "schema_version": "2.0.0",
+  "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+  "reranker_model": "models/mmarco-mMiniLMv2-L12-H384-v1",
+  "reranker_backend": "cross_encoder",
+  "real_model_run": true,
+  "reranker_model_revision": null,
+  "candidate_top_k": 15,
+  "final_top_k": 5,
+  "dataset_counts": {
+    "total": 60,
+    "answerable": 36,
+    "unanswerable": 24
+  },
+  "candidate_metrics": {
+    "case_count": 36,
+    "hit_at_5": 0.916667,
+    "hit_at_10": 0.972222,
+    "hit_at_15": 1.0,
+    "recall_at_5": 0.902778,
+    "recall_at_10": 0.972222,
+    "recall_at_15": 1.0,
+    "mean_reciprocal_rank": 0.700475
+  },
+  "vector_metrics": {
+    "case_count": 36,
+    "hit_at_1": 0.555556,
+    "hit_at_3": 0.777778,
+    "hit_at_5": 0.916667,
+    "recall_at_1": 0.5,
+    "recall_at_3": 0.722222,
+    "recall_at_5": 0.902778,
+    "mean_reciprocal_rank": 0.689352
+  },
+  "reranked_metrics": {
+    "case_count": 36,
+    "hit_at_1": 0.861111,
+    "hit_at_3": 1.0,
+    "hit_at_5": 1.0,
+    "recall_at_1": 0.777778,
+    "recall_at_3": 0.972222,
+    "recall_at_5": 0.986111,
+    "mean_reciprocal_rank": 0.925926
+  },
+  "metric_deltas": {
+    "hit_at_1": {
+      "vector_value": 0.555556,
+      "reranked_value": 0.861111,
+      "absolute_delta": 0.305556,
+      "relative_delta": 0.55
+    },
+    "hit_at_3": {
+      "vector_value": 0.777778,
+      "reranked_value": 1.0,
+      "absolute_delta": 0.222222,
+      "relative_delta": 0.285714
+    },
+    "hit_at_5": {
+      "vector_value": 0.916667,
+      "reranked_value": 1.0,
+      "absolute_delta": 0.083333,
+      "relative_delta": 0.090909
+    },
+    "recall_at_1": {
+      "vector_value": 0.5,
+      "reranked_value": 0.777778,
+      "absolute_delta": 0.277778,
+      "relative_delta": 0.555556
+    },
+    "recall_at_3": {
+      "vector_value": 0.722222,
+      "reranked_value": 0.972222,
+      "absolute_delta": 0.25,
+      "relative_delta": 0.346154
+    },
+    "recall_at_5": {
+      "vector_value": 0.902778,
+      "reranked_value": 0.986111,
+      "absolute_delta": 0.083333,
+      "relative_delta": 0.092308
+    },
+    "mean_reciprocal_rank": {
+      "vector_value": 0.689352,
+      "reranked_value": 0.925926,
+      "absolute_delta": 0.236574,
+      "relative_delta": 0.343183
+    }
+  },
+  "metrics_by_category": {
+    "vector": {
+      "direct": {
+        "case_count": 15,
+        "hit_at_1": 0.666667,
+        "hit_at_3": 0.933333,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.666667,
+        "recall_at_3": 0.933333,
+        "recall_at_5": 1.0,
+        "mean_reciprocal_rank": 0.805556
+      },
+      "multi_evidence": {
+        "case_count": 6,
+        "hit_at_1": 0.666667,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.333333,
+        "recall_at_3": 0.666667,
+        "recall_at_5": 0.916667,
+        "mean_reciprocal_rank": 0.805556
+      },
+      "paraphrase": {
+        "case_count": 15,
+        "hit_at_1": 0.4,
+        "hit_at_3": 0.533333,
+        "hit_at_5": 0.8,
+        "recall_at_1": 0.4,
+        "recall_at_3": 0.533333,
+        "recall_at_5": 0.8,
+        "mean_reciprocal_rank": 0.526667
+      }
+    },
+    "reranked": {
+      "direct": {
+        "case_count": 15,
+        "hit_at_1": 0.8,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.8,
+        "recall_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "mean_reciprocal_rank": 0.888889
+      },
+      "multi_evidence": {
+        "case_count": 6,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.5,
+        "recall_at_3": 0.833333,
+        "recall_at_5": 0.916667,
+        "mean_reciprocal_rank": 1.0
+      },
+      "paraphrase": {
+        "case_count": 15,
+        "hit_at_1": 0.866667,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.866667,
+        "recall_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "mean_reciprocal_rank": 0.933333
+      }
+    }
+  },
+  "metrics_by_difficulty": {
+    "vector": {
+      "easy": {
+        "case_count": 9,
+        "hit_at_1": 0.666667,
+        "hit_at_3": 0.888889,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.666667,
+        "recall_at_3": 0.888889,
+        "recall_at_5": 1.0,
+        "mean_reciprocal_rank": 0.787037
+      },
+      "hard": {
+        "case_count": 6,
+        "hit_at_1": 0.666667,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.416667,
+        "recall_at_3": 0.666667,
+        "recall_at_5": 0.916667,
+        "mean_reciprocal_rank": 0.805556
+      },
+      "medium": {
+        "case_count": 21,
+        "hit_at_1": 0.47619,
+        "hit_at_3": 0.666667,
+        "hit_at_5": 0.857143,
+        "recall_at_1": 0.452381,
+        "recall_at_3": 0.666667,
+        "recall_at_5": 0.857143,
+        "mean_reciprocal_rank": 0.614286
+      }
+    },
+    "reranked": {
+      "easy": {
+        "case_count": 9,
+        "hit_at_1": 0.777778,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.777778,
+        "recall_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "mean_reciprocal_rank": 0.87037
+      },
+      "hard": {
+        "case_count": 6,
+        "hit_at_1": 1.0,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.583333,
+        "recall_at_3": 0.833333,
+        "recall_at_5": 0.916667,
+        "mean_reciprocal_rank": 1.0
+      },
+      "medium": {
+        "case_count": 21,
+        "hit_at_1": 0.857143,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.833333,
+        "recall_at_3": 1.0,
+        "recall_at_5": 1.0,
+        "mean_reciprocal_rank": 0.928571
+      }
+    }
+  },
+  "metrics_by_split": {
+    "vector": {
+      "calibration": {
+        "case_count": 25,
+        "hit_at_1": 0.48,
+        "hit_at_3": 0.76,
+        "hit_at_5": 0.92,
+        "recall_at_1": 0.42,
+        "recall_at_3": 0.72,
+        "recall_at_5": 0.92,
+        "mean_reciprocal_rank": 0.644667
+      },
+      "test": {
+        "case_count": 11,
+        "hit_at_1": 0.727273,
+        "hit_at_3": 0.818182,
+        "hit_at_5": 0.909091,
+        "recall_at_1": 0.681818,
+        "recall_at_3": 0.727273,
+        "recall_at_5": 0.863636,
+        "mean_reciprocal_rank": 0.790909
+      }
+    },
+    "reranked": {
+      "calibration": {
+        "case_count": 25,
+        "hit_at_1": 0.84,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.76,
+        "recall_at_3": 0.98,
+        "recall_at_5": 1.0,
+        "mean_reciprocal_rank": 0.913333
+      },
+      "test": {
+        "case_count": 11,
+        "hit_at_1": 0.909091,
+        "hit_at_3": 1.0,
+        "hit_at_5": 1.0,
+        "recall_at_1": 0.818182,
+        "recall_at_3": 0.954545,
+        "recall_at_5": 0.954545,
+        "mean_reciprocal_rank": 0.954545
+      }
+    }
+  },
+  "focus_case_results": [
+    {
+      "case_id": "p-001",
+      "question": "接口函数里堆满了分支判断和流程编排，这种写法合适吗？",
+      "candidate_first_relevant_rank": 6,
+      "candidate_hit_at_15": true,
+      "candidate_max_retrieval_score": 0.592437,
+      "vector_max_retrieval_score": 0.592437,
+      "reranked_max_retrieval_score": 0.592437,
+      "vector_decision_at_comparison": true,
+      "reranked_decision_at_comparison": true,
+      "vector_decision_at_recommended": true,
+      "reranked_decision_at_recommended": true,
+      "vector_first_relevant_rank": null,
+      "reranked_first_relevant_rank": 1,
+      "rank_change": null,
+      "improved": true,
+      "regressed": false,
+      "reranker_applied": true,
+      "reranker_fallback": false
+    },
+    {
+      "case_id": "p-010",
+      "question": "一笔转账在中途失败，怎么保证账目不会对不上？",
+      "candidate_first_relevant_rank": 7,
+      "candidate_hit_at_15": true,
+      "candidate_max_retrieval_score": 0.438538,
+      "vector_max_retrieval_score": 0.438538,
+      "reranked_max_retrieval_score": 0.438538,
+      "vector_decision_at_comparison": true,
+      "reranked_decision_at_comparison": true,
+      "vector_decision_at_recommended": false,
+      "reranked_decision_at_recommended": false,
+      "vector_first_relevant_rank": null,
+      "reranked_first_relevant_rank": 2,
+      "rank_change": null,
+      "improved": true,
+      "regressed": false,
+      "reranker_applied": true,
+      "reranker_fallback": false
+    },
+    {
+      "case_id": "p-012",
+      "question": "一个只有两种取值的状态列，值不值得单独加索引？",
+      "candidate_first_relevant_rank": 11,
+      "candidate_hit_at_15": true,
+      "candidate_max_retrieval_score": 0.457183,
+      "vector_max_retrieval_score": 0.457183,
+      "reranked_max_retrieval_score": 0.457183,
+      "vector_decision_at_comparison": true,
+      "reranked_decision_at_comparison": true,
+      "vector_decision_at_recommended": false,
+      "reranked_decision_at_recommended": false,
+      "vector_first_relevant_rank": null,
+      "reranked_first_relevant_rank": 2,
+      "rank_change": null,
+      "improved": true,
+      "regressed": false,
+      "reranker_applied": true,
+      "reranker_fallback": false
+    }
+  ],
+  "improved_case_ids": [
+    "d-001",
+    "d-002",
+    "d-003",
+    "d-010",
+    "d-011",
+    "p-001",
+    "p-002",
+    "p-004",
+    "p-005",
+    "p-006",
+    "p-009",
+    "p-010",
+    "p-012",
+    "p-015",
+    "m-003",
+    "m-005"
+  ],
+  "regressed_case_ids": [
+    "d-004",
+    "d-007"
+  ],
+  "unchanged_case_ids": [
+    "d-005",
+    "d-006",
+    "d-008",
+    "d-009",
+    "d-012",
+    "d-013",
+    "d-014",
+    "d-015",
+    "p-003",
+    "p-007",
+    "p-008",
+    "p-011",
+    "p-013",
+    "p-014",
+    "m-001",
+    "m-002",
+    "m-004",
+    "m-006"
+  ],
+  "reranker_applied_count": 60,
+  "reranker_fallback_count": 0,
+  "reranker_fallback_rate": 0.0,
+  "decision_invariance_check": {
+    "passed": true,
+    "inconsistent_case_ids": [],
+    "note": "评估对每道题的 vector-only 与 reranked 分支分别独立计算候选池最高向量分数（vector_max_retrieval_score / reranked_max_retrieval_score），再调用生产函数 has_sufficient_context 在对比阈值与推荐阈值下执行真实断言。两分支分数由完整候选池独立导出；若重排阶段丢失候选或修改检索分数导致两分支决策不一致，本检查会失败并阻止启用建议。"
+  },
+  "split_roles": [
+    {
+      "split": "calibration",
+      "role": "用于阈值校准的 split，在本 A/B 中也参与指标计算。"
+    },
+    {
+      "split": "test",
+      "role": "test 结果公开后应视为已发布的回归测试集。正式比较多个 Reranker 方案时，需要新增一份从未用于开发决策的独立 final holdout。"
+    }
+  ],
+  "reproducibility": {
+    "fake_reranker": "自动化测试使用 FakeReranker，在相同输入和代码下输出逐字节稳定。",
+    "real_reranker": "真实 Reranker 基线在相同代码、模型、依赖版本和环境下才应当稳定。",
+    "latency": "延迟数据依赖设备和运行环境，不写入确定性质量 baseline。"
+  },
+  "known_limits": [
+    "语料规模有限（25 Chunk），指标存在抽样波动。",
+    "不评估生成答案质量，只评估检索排序。",
+    "test split 已公开，作为回归基准使用，不是完全未见的最终结果。",
+    "Reranker 分数语义不同于向量相似度，不可直接比较或复用阈值。",
+    "延迟结果依赖设备和运行环境。"
+  ],
+  "recommendation": {
+    "recommend_enable": true,
+    "reasons": [
+      "Reranked Hit@1 > Vector Hit@1",
+      "Reranked MRR > Vector MRR",
+      "Paraphrase MRR 提升 0.4067",
+      "Hit@5 无明显退化",
+      "Direct Hit@5 无明显退化",
+      "退化案例数 2 在上限内",
+      "拒答决策一致性检查通过"
+    ],
+    "note": "只有 backend=cross_encoder 且 real_model_run=true 的真实 CrossEncoder 完整运行才可能产生启用建议；FakeReranker 或测试替身永远不会产生生产启用建议。即使达到推荐标准，也不自动修改生产配置。RAG_RERANKER_ENABLED 仍需人工评估后显式设置。"
+  },
+  "classification_note": "每个可回答问题必须且只能属于 improved / regressed / unchanged 之一；两个分支都未命中（vector 与 reranked 均 miss）的题目归入 unchanged。不可回答题目不进入任何检索排名变化集合。"
+}
