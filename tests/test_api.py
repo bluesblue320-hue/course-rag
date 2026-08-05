@@ -1,5 +1,7 @@
 from collections.abc import Iterator
+from contextlib import contextmanager
 import os
+import json
 from pathlib import Path
 
 import numpy as np
@@ -132,6 +134,10 @@ def test_app_builds_index_once_and_health_reports_chunk_count(
         "generation_ready": True,
         "rag_ready": True,
         "min_relevance_score": 0.35,
+        "reranker_enabled": False,
+        "reranker_ready": False,
+        "reranker_model": None,
+        "reranker_status": "disabled",
     }
     assert second_response.status_code == 200
     assert FakeEmbeddingService.init_count == 1
@@ -193,6 +199,10 @@ def test_app_starts_without_llm_and_keeps_retrieval_available(
         "generation_ready": False,
         "rag_ready": False,
         "min_relevance_score": None,
+        "reranker_enabled": False,
+        "reranker_ready": False,
+        "reranker_model": None,
+        "reranker_status": "disabled",
     }
     assert search_response.status_code == 200
     assert ask_response.status_code == 503
@@ -363,6 +373,9 @@ def test_search_uses_default_top_k_and_returns_typed_results(
         "document_id": "builtin-knowledge",
         "filename": "knowledge.txt",
         "page_number": None,
+        "retrieval_rank": None,
+        "rerank_score": None,
+        "reranker_applied": False,
     }
     assert FakeEmbeddingService.queries == ["业务逻辑应该写在哪里？"]
 
@@ -437,6 +450,9 @@ def test_ask_returns_answer_sources_timings_and_model_names(
         "document_id": "builtin-knowledge",
         "filename": "knowledge.txt",
         "page_number": None,
+        "retrieval_rank": None,
+        "rerank_score": None,
+        "reranker_applied": False,
     }
     assert body["retrieval_elapsed_ms"] == 10.5
     assert body["generation_elapsed_ms"] == 720.2
@@ -458,6 +474,9 @@ def test_ask_returns_structured_insufficient_context_without_generation(
         "document_id": "builtin-knowledge",
         "filename": "knowledge.txt",
         "page_number": None,
+        "retrieval_rank": None,
+        "rerank_score": None,
+        "reranker_applied": False,
     }
 
     class LowScoreRetriever:
@@ -591,6 +610,10 @@ def test_invalid_rag_configuration_keeps_search_available_and_closes_generation(
             "generation_ready": True,
             "rag_ready": False,
             "min_relevance_score": None,
+            "reranker_enabled": False,
+            "reranker_ready": False,
+            "reranker_model": None,
+            "reranker_status": "disabled",
         }
         assert search_response.status_code == 200
         assert ask_response.status_code == 503
@@ -669,3 +692,318 @@ def test_dotenv_and_generation_are_initialized_before_threshold_resolution(
         pass
 
     assert events == ["dotenv", "generation", "threshold"]
+
+
+# ---------------------------------------------------------------------------
+# Reranker status in /health (Fix 6)
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _build_reranker_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    env: dict[str, str],
+    build_reranker_override: object | None = None,
+) -> "Iterator[TestClient]":  # type: ignore[name-defined]
+    FakeEmbeddingService.init_count = 0
+    FakeEmbeddingService.document_encode_count = 0
+    FakeEmbeddingService.queries = []
+    FakeGenerationService.init_count = 0
+    FakeGenerationService.close_count = 0
+    FakeGenerationService.prompts = []
+
+    knowledge_file = tmp_path / "knowledge.txt"
+    knowledge_file.write_text("A" * 900, encoding="utf-8")
+
+    monkeypatch.setattr(api_module, "KNOWLEDGE_PATH", knowledge_file)
+    monkeypatch.setattr(api_module, "UPLOAD_DIR", tmp_path / "uploads")
+    monkeypatch.setattr(
+        api_module,
+        "METADATA_PATH",
+        tmp_path / "documents.json",
+    )
+    monkeypatch.setattr(api_module, "EmbeddingService", FakeEmbeddingService)
+    monkeypatch.setattr(api_module, "GenerationService", FakeGenerationService)
+    monkeypatch.setattr(
+        api_module,
+        "load_dotenv",
+        lambda *, dotenv_path, override: None,
+    )
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    if build_reranker_override is not None:
+        monkeypatch.setattr(
+            api_module, "build_reranker", build_reranker_override
+        )
+
+    with TestClient(api_module.app) as test_client:
+        yield test_client
+
+
+class TestRerankerHealthStatus:
+    def test_disabled_status(self, tmp_path, monkeypatch) -> None:
+        with _build_reranker_client(
+            tmp_path, monkeypatch, env={"RAG_RERANKER_ENABLED": "false"}
+        ) as client:
+            body = client.get("/health").json()
+        assert body["reranker_enabled"] is False
+        assert body["reranker_ready"] is False
+        assert body["reranker_status"] == "disabled"
+        assert body["reranker_model"] is None
+
+    def test_enabled_ready_status(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        def fake_build(config):
+            return FakeReranker()
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=fake_build,
+        ) as client:
+            body = client.get("/health").json()
+            search = client.post("/search", json={"query": "课程问题"})
+            ask = client.post("/ask", json={"question": "课程问题"})
+
+        assert body["reranker_enabled"] is True
+        assert body["reranker_ready"] is True
+        assert body["reranker_status"] == "ready"
+        assert body["reranker_model"] == "local-zh-model"
+        assert search.status_code == 200
+        assert ask.status_code == 200
+
+    def test_enabled_load_failed_status(self, tmp_path, monkeypatch) -> None:
+        def failing_build(config):
+            raise RuntimeError(
+                "model not found at C:\\secret\\cache\\local-zh-model"
+            )
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=failing_build,
+        ) as client:
+            body = client.get("/health").json()
+            search = client.post("/search", json={"query": "课程问题"})
+            ask = client.post("/ask", json={"question": "课程问题"})
+
+        # Enabled but model load failed -> load_failed, not disabled.
+        assert body["reranker_enabled"] is True
+        assert body["reranker_ready"] is False
+        assert body["reranker_status"] == "load_failed"
+        assert body["reranker_model"] == "local-zh-model"
+        # No internal path / stack must leak into the health payload.
+        assert "C:" not in json.dumps(body, ensure_ascii=False)
+        assert "Traceback" not in json.dumps(body, ensure_ascii=False)
+        # Search and ask must still work via vector-only.
+        assert search.status_code == 200
+        assert ask.status_code == 200
+
+    def test_config_invalid_status(self, tmp_path, monkeypatch) -> None:
+        # Enabled but empty model name -> config resolution fails.
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "",
+            },
+        ) as client:
+            body = client.get("/health").json()
+
+        # The user did request enablement, so enabled stays true; only the
+        # model configuration is invalid.
+        assert body["reranker_enabled"] is True
+        assert body["reranker_status"] == "config_invalid"
+        assert body["reranker_ready"] is False
+        assert body["reranker_model"] is None
+
+    def test_invalid_enable_flag_status(self, tmp_path, monkeypatch) -> None:
+        # RAG_RERANKER_ENABLED=maybe cannot be parsed: the system cannot
+        # confirm a request to enable, so enabled stays false with
+        # config_invalid.
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={"RAG_RERANKER_ENABLED": "maybe"},
+        ) as client:
+            body = client.get("/health").json()
+
+        assert body["reranker_enabled"] is False
+        assert body["reranker_ready"] is False
+        assert body["reranker_status"] == "config_invalid"
+        assert body["reranker_model"] is None
+
+    def test_health_redacts_local_model_path(self, tmp_path, monkeypatch) -> None:
+        local_path = "C:\\Users\\secret-user\\.cache\\models\\my-reranker"
+
+        def fake_build(config):
+            return FakeReranker()
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": local_path,
+            },
+            build_reranker_override=fake_build,
+        ) as client:
+            body = client.get("/health").json()
+
+        payload = json.dumps(body, ensure_ascii=False)
+        assert body["reranker_model"] == "<local-model>"
+        assert "secret-user" not in payload
+        assert "C:" not in payload
+        assert ".cache" not in payload
+
+    def test_health_keeps_huggingface_model_id(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        def fake_build(config):
+            return FakeReranker()
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "BAAI/bge-reranker-v2-m3",
+            },
+            build_reranker_override=fake_build,
+        ) as client:
+            body = client.get("/health").json()
+
+        assert body["reranker_model"] == "BAAI/bge-reranker-v2-m3"
+        assert body["reranker_status"] == "ready"
+
+
+class TestRequestTimeFallbackVisibility:
+    """/search and /ask top-level reranker_applied / reranker_fallback."""
+
+    def test_search_default_disabled(self, tmp_path, monkeypatch) -> None:
+        with _build_reranker_client(
+            tmp_path, monkeypatch, env={"RAG_RERANKER_ENABLED": "false"}
+        ) as client:
+            body = client.post("/search", json={"query": "课程问题"}).json()
+
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is False
+
+    def test_search_reranker_applied(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(),
+        ) as client:
+            body = client.post("/search", json={"query": "课程问题"}).json()
+
+        assert body["reranker_applied"] is True
+        assert body["reranker_fallback"] is False
+        assert body["results"]
+
+    def test_search_request_time_fallback(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(fail=True),
+        ) as client:
+            response = client.post("/search", json={"query": "课程问题"})
+            body = response.json()
+
+        assert response.status_code == 200
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is True
+        # Fallback preserves the original vector order and still returns results.
+        assert body["results"]
+
+    def test_ask_default_disabled(self, tmp_path, monkeypatch) -> None:
+        with _build_reranker_client(
+            tmp_path, monkeypatch, env={"RAG_RERANKER_ENABLED": "false"}
+        ) as client:
+            body = client.post("/ask", json={"question": "课程问题"}).json()
+
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is False
+
+    def test_ask_reranker_applied(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(),
+        ) as client:
+            body = client.post("/ask", json={"question": "课程问题"}).json()
+
+        assert body["reranker_applied"] is True
+        assert body["reranker_fallback"] is False
+        assert body["answer_status"] == "answered"
+
+    def test_ask_request_time_fallback(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(fail=True),
+        ) as client:
+            response = client.post("/ask", json={"question": "课程问题"})
+            body = response.json()
+
+        assert response.status_code == 200
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is True
+        # Fallback does not add extra LLM calls: still exactly one generation.
+        assert body["answer_status"] == "answered"
+
+    def test_applied_and_fallback_never_both_true(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(),
+        ) as client:
+            search_body = client.post(
+                "/search", json={"query": "课程问题"}
+            ).json()
+            ask_body = client.post("/ask", json={"question": "课程问题"}).json()
+
+        assert not (search_body["reranker_applied"] and search_body["reranker_fallback"])
+        assert not (ask_body["reranker_applied"] and ask_body["reranker_fallback"])

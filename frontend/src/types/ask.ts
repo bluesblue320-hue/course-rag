@@ -13,6 +13,12 @@ export interface AskSource {
   document_id: string
   filename: string
   page_number: number | null
+  /** Original vector retrieval rank (before optional reranking). */
+  retrieval_rank?: number | null
+  /** Second-stage reranker score (null when reranker not applied). */
+  rerank_score?: number | null
+  /** Whether the reranker was applied to this result. */
+  reranker_applied?: boolean
 }
 
 export interface AskResponse {
@@ -27,6 +33,10 @@ export interface AskResponse {
   embedding_model: string
   llm_model: string
   sources: AskSource[]
+  /** Whether the reranker was applied during retrieval. */
+  reranker_applied?: boolean
+  /** Whether the reranker fell back to vector-only ordering. */
+  reranker_fallback?: boolean
 }
 
 export interface AskApiError {

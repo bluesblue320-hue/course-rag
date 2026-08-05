@@ -316,6 +316,41 @@ python -m scripts.evaluate_rag
 
 补充两点：`0.35` 只是仓库代码里的拒答默认值，仅作报告对比基准，不一定等于部署环境实际生效的阈值（部署值可能由 `RAG_MIN_RELEVANCE_SCORE` 覆盖）；test split 的结果已随本仓库公开，之后更适合作为回归基准，不再是未来完全未见的最终 holdout，正式横评需要另取一个新留出集。
 
+## 可选 Reranker
+
+系统支持可选的两阶段检索（向量候选池 + CrossEncoder Reranker）。Reranker 默认关闭，启用时在向量检索之后对更大候选池（默认 Top-15）进行精排，返回最终 Top-K。
+
+**配置**（`.env`）：
+
+```env
+RAG_RERANKER_ENABLED=false
+RAG_RERANKER_MODEL=<本地缓存的中文或多语言 CrossEncoder 模型>
+RAG_RERANKER_CANDIDATE_TOP_K=15
+```
+
+- `RAG_RERANKER_ENABLED=false` 时行为与原来完全一致，不加载额外模型
+- 拒答决策仍基于 `retrieval_score`（向量相似度），不使用 `rerank_score`
+- Reranker 失败时安全回退到原始向量排序
+- **Reranker 模型必须与语料语言匹配**：本项目语料为中文，应使用中文或多语言 CrossEncoder 模型，**不要默认使用英文 MS MARCO 模型**（如 `cross-encoder/ms-marco-MiniLM-L-6-v2`）；模型必须提前下载并存在于本地缓存，以 `local_files_only` 方式加载，不会自动联网下载
+- `/search` 与 `/ask` 顶层响应暴露 `reranker_applied`（本次请求实际使用 Reranker）与 `reranker_fallback`（本次请求尝试 Reranker 但失败回退）；两者不会同时为 true
+- `/health` 的 `reranker_model` 会对本地路径脱敏（显示为 `<local-model>`）；`config_invalid` 状态下若启用标志本身无法解析，`reranker_enabled` 保持 false
+- 每个可回答问题必须且只能属于 improved / regressed / unchanged 之一，**两个分支都未命中的题目归入 unchanged**
+- **只有真实 CrossEncoder 完整运行（`real_model_run=true`）才可能产生生产启用建议**；FakeReranker 或测试替身（`real_model_run=false`）永远不会
+
+**A/B 评估**：
+
+```powershell
+python -m scripts.evaluate_reranker `
+  --manifest eval/corpus_manifest.json `
+  --dataset eval/dataset.jsonl `
+  --candidate-top-k 15 `
+  --final-top-k 5 `
+  --reranker-model "<本地缓存的中文或多语言 CrossEncoder 模型>" `
+  --output-dir reports/generated/reranking
+```
+
+报告对比 vector-only 与 reranked 两种模式的 Hit@K、Recall@K、MRR，并按 category / difficulty / split 分组。详见 [`docs/reranking.md`](docs/reranking.md)。
+
 ## 示例问题
 
 - 业务逻辑应该写在哪一层？
