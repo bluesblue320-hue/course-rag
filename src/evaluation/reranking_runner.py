@@ -33,6 +33,8 @@ from src.evaluation.reranking_models import (
     DecisionInvarianceResult,
     LatencyRecord,
     RerankingCaseResult,
+    RerankerRunIdentity,
+    classify_rank_change,
 )
 from src.evaluation.reranking_metrics import (
     BranchMetrics,
@@ -99,6 +101,7 @@ class RerankingRun:
     reranker_applied_count: int
     reranker_fallback_count: int
     reranker_fallback_rate: float | None
+    reranker_identity: RerankerRunIdentity
     recommend_enable: bool
     recommendation_reasons: tuple[str, ...]
     latency_records: tuple[LatencyRecord, ...]
@@ -279,9 +282,10 @@ def check_decision_invariance(
     the reranked view (``reranked_max_score``) at both the comparison and
     recommended thresholds, and reports failure when they disagree.
 
-    Although the current pipeline shares one ``max_retrieval_score`` between
-    both branches (so the two inputs are normally identical), this is a real
-    assertion, not a hardcoded ``True``: feed differing scores and it fails.
+    The runner derives the two inputs independently from the full candidate
+    pool, so the check is a real assertion over actual data flow: if the
+    reranking stage loses candidates or modifies retrieval scores, the inputs
+    diverge and the check fails.
     """
     vector_at_comparison = has_sufficient_context(
         vector_max_score, comparison_threshold
@@ -318,15 +322,17 @@ def _check_decision_invariance(
 ) -> tuple[bool, tuple[str, ...]]:
     """Run :func:`check_decision_invariance` per case and aggregate.
 
-    Returns ``(passed, inconsistent_case_ids)``.  Both branches currently share
-    ``max_retrieval_score``, so this normally passes; if a case ever yields
-    differing decisions the check fails and the offending case id is reported.
+    Returns ``(passed, inconsistent_case_ids)``.  The runner stores
+    ``vector_max_retrieval_score`` and ``reranked_max_retrieval_score``
+    independently per case, so a reranking stage that loses candidates or
+    corrupts retrieval scores makes the two inputs differ and the check
+    genuinely fails, reporting the offending case ids.
     """
     inconsistent: list[str] = []
     for case in results:
         result = check_decision_invariance(
-            vector_max_score=case.max_retrieval_score,
-            reranked_max_score=case.max_retrieval_score,
+            vector_max_score=case.vector_max_retrieval_score,
+            reranked_max_score=case.reranked_max_retrieval_score,
             comparison_threshold=comparison_threshold,
             recommended_threshold=recommended_threshold,
             case_id=case.case_id,
@@ -343,37 +349,49 @@ def _evaluate_recommendation(
     reranked_by_category: dict[str, BranchMetrics],
     regressed_count: int,
     decision_invariance_passed: bool,
-    reranker_model: str,
+    reranker_identity: RerankerRunIdentity,
     reranker_fallback_count: int = 0,
 ) -> tuple[bool, tuple[str, ...]]:
     """Apply transparent, rule-based recommendation logic.
 
     These thresholds are project acceptance criteria, not industry standards.
+
+    Gate order: real model identity -> fallback -> data integrity -> metric
+    thresholds -> decision invariance.  A fake or custom reranker, or any
+    run where ``real_model_run`` is false, can never justify a production
+    enable recommendation regardless of how good its metrics look.
     """
     reasons: list[str] = []
 
-    # 0. No fallback allowed.  A fallback means the run did not exercise the
+    # 0. Real model provenance.  A run that did not actually execute a real
+    #    CrossEncoder cannot justify enabling it in production.
+    if not reranker_identity.real_model_run:
+        return False, ("本次运行未使用真实 CrossEncoder，不能建议生产启用",)
+    if reranker_identity.backend != "cross_encoder":
+        return False, ("本次运行不是 CrossEncoder baseline，不能建议生产启用",)
+
+    # 1. No fallback allowed.  A fallback means the run did not exercise the
     #    real reranker end-to-end, so it cannot be used to justify enabling it.
     if reranker_fallback_count > 0:
         return False, (
             f"Reranker 在 {reranker_fallback_count} 个案例中发生回退，不能建议启用",
         )
 
-    # 1. Reranked Hit@1 > Vector Hit@1
+    # 2. Reranked Hit@1 > Vector Hit@1
     if reranked_metrics.hit_at_1 is None or vector_metrics.hit_at_1 is None:
         return False, ("Hit@1 数据缺失",)
     if reranked_metrics.hit_at_1 <= vector_metrics.hit_at_1:
         return False, ("Reranked Hit@1 未超过 Vector Hit@1",)
     reasons.append("Reranked Hit@1 > Vector Hit@1")
 
-    # 2. Reranked MRR > Vector MRR
+    # 3. Reranked MRR > Vector MRR
     if reranked_metrics.mean_reciprocal_rank is None or vector_metrics.mean_reciprocal_rank is None:
         return False, ("MRR 数据缺失",)
     if reranked_metrics.mean_reciprocal_rank <= vector_metrics.mean_reciprocal_rank:
         return False, ("Reranked MRR 未超过 Vector MRR",)
     reasons.append("Reranked MRR > Vector MRR")
 
-    # 3. Paraphrase improvement
+    # 4. Paraphrase improvement
     para_vector = vector_by_category.get("paraphrase")
     para_reranked = reranked_by_category.get("paraphrase")
     if para_vector is None or para_reranked is None:
@@ -387,7 +405,7 @@ def _evaluate_recommendation(
         )
     reasons.append(f"Paraphrase MRR 提升 {para_mrr_delta:.4f}")
 
-    # 4. Reranked Hit@5 >= Vector Hit@5
+    # 5. Reranked Hit@5 >= Vector Hit@5
     if reranked_metrics.hit_at_5 is None or vector_metrics.hit_at_5 is None:
         return False, ("Hit@5 数据缺失",)
     hit5_delta = (reranked_metrics.hit_at_5 or 0) - (vector_metrics.hit_at_5 or 0)
@@ -395,7 +413,7 @@ def _evaluate_recommendation(
         return False, (f"Hit@5 退化 {abs(hit5_delta):.4f}",)
     reasons.append("Hit@5 无明显退化")
 
-    # 5. Direct Hit@5 not significantly degraded
+    # 6. Direct Hit@5 not significantly degraded
     direct_vector = vector_by_category.get("direct")
     direct_reranked = reranked_by_category.get("direct")
     if direct_vector is not None and direct_reranked is not None:
@@ -404,20 +422,15 @@ def _evaluate_recommendation(
             return False, (f"Direct Hit@5 退化 {abs(direct_delta):.4f}",)
         reasons.append("Direct Hit@5 无明显退化")
 
-    # 6. Regressed cases within limit
+    # 7. Regressed cases within limit
     if regressed_count > 5:
         return False, (f"退化案例数 {regressed_count} 超过上限 5",)
     reasons.append(f"退化案例数 {regressed_count} 在上限内")
 
-    # 7. Decision invariance check passed
+    # 8. Decision invariance check passed
     if not decision_invariance_passed:
         return False, ("拒答决策一致性检查未通过",)
     reasons.append("拒答决策一致性检查通过")
-
-    # 8. Real reranker model specified
-    if not reranker_model:
-        return False, ("未指定真实 Reranker 模型",)
-    reasons.append(f"使用真实 Reranker: {reranker_model}")
 
     # Check absolute improvement thresholds
     hit1_delta = reranked_metrics.hit_at_1 - vector_metrics.hit_at_1
@@ -450,6 +463,7 @@ def run_reranking_evaluation(
     comparison_threshold: float,
     recommended_threshold: float,
     include_latency: bool = False,
+    reranker_identity: RerankerRunIdentity | None = None,
 ) -> RerankingRun:
     """Execute the A/B reranking evaluation.
 
@@ -459,6 +473,11 @@ def run_reranking_evaluation(
     3. Split into vector-only (first ``final_top_k``) and reranked (full pool
        re-scored, then truncated to ``final_top_k``).
     4. Compute metrics for both branches.
+
+    ``reranker_identity`` records the actual reranker provenance.  When it is
+    omitted (for example in tests that inject a substitute), a safe identity
+    with ``real_model_run=False`` is assumed so no production enable
+    recommendation can ever be produced from an unverified run.
     """
     if not cases:
         raise EvaluationError("评估数据集不能为空")
@@ -471,6 +490,15 @@ def run_reranking_evaluation(
         raise EvaluationError("candidate_top_k 必须大于等于 final_top_k")
     if final_top_k < 5:
         raise EvaluationError("final_top_k 必须大于等于 5")
+
+    # Safe default provenance: without explicit identity we cannot claim a
+    # real CrossEncoder ran, so the run can never justify production enablement.
+    if reranker_identity is None:
+        reranker_identity = RerankerRunIdentity(
+            backend="custom",
+            real_model_run=False,
+            model_name=reranker_model,
+        )
 
     # Build the index once (document embeddings computed once)
     document_embeddings = embedding_service.encode_documents(
@@ -496,8 +524,14 @@ def run_reranking_evaluation(
         vector_retrieval_ms = (retrieval_end - retrieval_start) * 1000
 
         candidates = list(_to_candidate_sources(raw_results))
-        max_retrieval_score = (
+        candidate_max_retrieval_score = (
             float(candidates[0]["score"]) if candidates else None
+        )
+        # The vector-only branch max is the candidate pool max (both come from
+        # the same original vector ranking).  It is derived independently from
+        # the candidate list, not copied from the reranked branch.
+        vector_max_retrieval_score = max(
+            (float(c["score"]) for c in candidates), default=None
         )
         candidate_count = len(candidates)
 
@@ -520,42 +554,50 @@ def run_reranking_evaluation(
         rerank_end = perf_counter()
         rerank_ms = (rerank_end - rerank_start) * 1000
 
+        # Derive the reranked branch max retrieval score from the COMPLETE
+        # reranked candidate list BEFORE truncation.  If the reranking stage
+        # loses candidates or corrupts retrieval scores, this value diverges
+        # from the vector max and the decision-invariance check fails.
+        reranked_max_retrieval_score = max(
+            (float(c["score"]) for c in reranked_sources), default=None
+        )
+
         reranked_truncated = reranked_sources[:final_top_k]
         reranked_result = _build_branch_result(case, reranked_truncated)
 
         reranker_applied = not fallback
         reranker_fallback = fallback
 
-        # Rank change
-        rank_change = None
-        improved = False
-        regressed = False
-        unchanged = False
-        if (
-            case.answerable
-            and vector_result.first_relevant_rank is not None
-            and reranked_result.first_relevant_rank is not None
-        ):
-            rank_change = (
-                reranked_result.first_relevant_rank
-                - vector_result.first_relevant_rank
-            )
-            if rank_change < 0:
-                improved = True
-            elif rank_change > 0:
-                regressed = True
-            else:
-                unchanged = True
-        elif case.answerable:
-            # One or both branches missed
-            vector_hit = vector_result.first_relevant_rank is not None
-            reranked_hit = reranked_result.first_relevant_rank is not None
-            if reranked_hit and not vector_hit:
-                improved = True
-            elif vector_hit and not reranked_hit:
-                regressed = True
-            elif vector_hit and reranked_hit:
-                unchanged = True
+        # Refusal-decision fields for this case: computed independently for
+        # each branch at both thresholds through the production function.
+        vector_decision_at_comparison = has_sufficient_context(
+            vector_max_retrieval_score, comparison_threshold
+        )
+        reranked_decision_at_comparison = has_sufficient_context(
+            reranked_max_retrieval_score, comparison_threshold
+        )
+        vector_decision_at_recommended = has_sufficient_context(
+            vector_max_retrieval_score, recommended_threshold
+        )
+        reranked_decision_at_recommended = has_sufficient_context(
+            reranked_max_retrieval_score, recommended_threshold
+        )
+
+        # Rank change: every answerable case belongs to exactly one of
+        # improved / regressed / unchanged (both-miss cases are unchanged).
+        classification = classify_rank_change(
+            vector_result.first_relevant_rank
+            if vector_result
+            else None,
+            reranked_result.first_relevant_rank
+            if reranked_result
+            else None,
+            answerable=case.answerable,
+        )
+        rank_change = classification.rank_change
+        improved = classification.improved
+        regressed = classification.regressed
+        unchanged = classification.unchanged
 
         end_to_end_ms = vector_retrieval_ms + rerank_ms
 
@@ -577,7 +619,13 @@ def run_reranking_evaluation(
                 answerable=case.answerable,
                 question=case.question,
                 candidate=candidate_result,
-                max_retrieval_score=max_retrieval_score,
+                max_retrieval_score=candidate_max_retrieval_score,
+                vector_max_retrieval_score=vector_max_retrieval_score,
+                reranked_max_retrieval_score=reranked_max_retrieval_score,
+                vector_decision_at_comparison=vector_decision_at_comparison,
+                reranked_decision_at_comparison=reranked_decision_at_comparison,
+                vector_decision_at_recommended=vector_decision_at_recommended,
+                reranked_decision_at_recommended=reranked_decision_at_recommended,
                 candidate_count=candidate_count,
                 vector=vector_result,
                 reranked=reranked_result,
@@ -634,7 +682,7 @@ def run_reranking_evaluation(
         reranked_by_category,
         len(regressed_case_ids),
         decision_invariance,
-        reranker_model,
+        reranker_identity,
         reranker_fallback_count=reranker_fallback_count,
     )
 
@@ -667,6 +715,7 @@ def run_reranking_evaluation(
         reranker_applied_count=reranker_applied_count,
         reranker_fallback_count=reranker_fallback_count,
         reranker_fallback_rate=reranker_fallback_rate,
+        reranker_identity=reranker_identity,
         recommend_enable=recommend_enable,
         recommendation_reasons=recommendation_reasons,
         latency_records=tuple(latency_records),

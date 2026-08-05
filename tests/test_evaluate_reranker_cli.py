@@ -188,6 +188,9 @@ class TestFullRun:
         assert "schema_version" in summary
         assert "embedding_model" in summary
         assert "reranker_model" in summary
+        assert "reranker_backend" in summary
+        assert "real_model_run" in summary
+        assert "reranker_model_revision" in summary
         assert "candidate_top_k" in summary
         assert "final_top_k" in summary
         assert "candidate_metrics" in summary
@@ -203,6 +206,57 @@ class TestFullRun:
         assert "unchanged_case_ids" in summary
         assert "decision_invariance_check" in summary
         assert "recommendation" in summary
+
+    def test_fake_reranker_run_never_recommends(self, tmp_path: Path) -> None:
+        """A fake reranker can never produce a production enable recommendation."""
+        output_dir = tmp_path / "output"
+
+        exit_code = main(
+            [
+                "--manifest", DEFAULT_MANIFEST,
+                "--dataset", DEFAULT_DATASET,
+                "--output-dir", str(output_dir),
+                "--candidate-top-k", "15",
+                "--final-top-k", "5",
+                "--reranker-model", "fake-reranker",
+            ],
+            embedding_factory=fake_embedding_factory,
+            reranker_factory=fake_reranker_factory,
+        )
+
+        assert exit_code == EXIT_OK
+        with open(output_dir / "summary.json", encoding="utf-8") as f:
+            summary = json.load(f)
+        # The run provenance is explicitly fake and never real.
+        assert summary["reranker_backend"] == "fake"
+        assert summary["real_model_run"] is False
+        assert summary["recommendation"]["recommend_enable"] is False
+        assert any(
+            "未使用真实 CrossEncoder" in r
+            for r in summary["recommendation"]["reasons"]
+        )
+
+    def test_cli_summary_shows_backend_and_real_model_run(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        output_dir = tmp_path / "output"
+
+        main(
+            [
+                "--manifest", DEFAULT_MANIFEST,
+                "--dataset", DEFAULT_DATASET,
+                "--output-dir", str(output_dir),
+                "--candidate-top-k", "15",
+                "--final-top-k", "5",
+                "--reranker-model", "fake-reranker",
+            ],
+            embedding_factory=fake_embedding_factory,
+            reranker_factory=fake_reranker_factory,
+        )
+
+        captured = capsys.readouterr()
+        assert "Reranker backend : fake" in captured.out
+        assert "Real model run   : 否" in captured.out
 
     def test_no_absolute_paths_in_summary(self, tmp_path: Path) -> None:
         output_dir = tmp_path / "output"

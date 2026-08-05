@@ -822,6 +822,188 @@ class TestRerankerHealthStatus:
         ) as client:
             body = client.get("/health").json()
 
+        # The user did request enablement, so enabled stays true; only the
+        # model configuration is invalid.
+        assert body["reranker_enabled"] is True
         assert body["reranker_status"] == "config_invalid"
         assert body["reranker_ready"] is False
         assert body["reranker_model"] is None
+
+    def test_invalid_enable_flag_status(self, tmp_path, monkeypatch) -> None:
+        # RAG_RERANKER_ENABLED=maybe cannot be parsed: the system cannot
+        # confirm a request to enable, so enabled stays false with
+        # config_invalid.
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={"RAG_RERANKER_ENABLED": "maybe"},
+        ) as client:
+            body = client.get("/health").json()
+
+        assert body["reranker_enabled"] is False
+        assert body["reranker_ready"] is False
+        assert body["reranker_status"] == "config_invalid"
+        assert body["reranker_model"] is None
+
+    def test_health_redacts_local_model_path(self, tmp_path, monkeypatch) -> None:
+        local_path = "C:\\Users\\secret-user\\.cache\\models\\my-reranker"
+
+        def fake_build(config):
+            return FakeReranker()
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": local_path,
+            },
+            build_reranker_override=fake_build,
+        ) as client:
+            body = client.get("/health").json()
+
+        payload = json.dumps(body, ensure_ascii=False)
+        assert body["reranker_model"] == "<local-model>"
+        assert "secret-user" not in payload
+        assert "C:" not in payload
+        assert ".cache" not in payload
+
+    def test_health_keeps_huggingface_model_id(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        def fake_build(config):
+            return FakeReranker()
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "BAAI/bge-reranker-v2-m3",
+            },
+            build_reranker_override=fake_build,
+        ) as client:
+            body = client.get("/health").json()
+
+        assert body["reranker_model"] == "BAAI/bge-reranker-v2-m3"
+        assert body["reranker_status"] == "ready"
+
+
+class TestRequestTimeFallbackVisibility:
+    """/search and /ask top-level reranker_applied / reranker_fallback."""
+
+    def test_search_default_disabled(self, tmp_path, monkeypatch) -> None:
+        with _build_reranker_client(
+            tmp_path, monkeypatch, env={"RAG_RERANKER_ENABLED": "false"}
+        ) as client:
+            body = client.post("/search", json={"query": "课程问题"}).json()
+
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is False
+
+    def test_search_reranker_applied(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(),
+        ) as client:
+            body = client.post("/search", json={"query": "课程问题"}).json()
+
+        assert body["reranker_applied"] is True
+        assert body["reranker_fallback"] is False
+        assert body["results"]
+
+    def test_search_request_time_fallback(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(fail=True),
+        ) as client:
+            response = client.post("/search", json={"query": "课程问题"})
+            body = response.json()
+
+        assert response.status_code == 200
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is True
+        # Fallback preserves the original vector order and still returns results.
+        assert body["results"]
+
+    def test_ask_default_disabled(self, tmp_path, monkeypatch) -> None:
+        with _build_reranker_client(
+            tmp_path, monkeypatch, env={"RAG_RERANKER_ENABLED": "false"}
+        ) as client:
+            body = client.post("/ask", json={"question": "课程问题"}).json()
+
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is False
+
+    def test_ask_reranker_applied(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(),
+        ) as client:
+            body = client.post("/ask", json={"question": "课程问题"}).json()
+
+        assert body["reranker_applied"] is True
+        assert body["reranker_fallback"] is False
+        assert body["answer_status"] == "answered"
+
+    def test_ask_request_time_fallback(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(fail=True),
+        ) as client:
+            response = client.post("/ask", json={"question": "课程问题"})
+            body = response.json()
+
+        assert response.status_code == 200
+        assert body["reranker_applied"] is False
+        assert body["reranker_fallback"] is True
+        # Fallback does not add extra LLM calls: still exactly one generation.
+        assert body["answer_status"] == "answered"
+
+    def test_applied_and_fallback_never_both_true(self, tmp_path, monkeypatch) -> None:
+        from src.reranker import FakeReranker
+
+        with _build_reranker_client(
+            tmp_path,
+            monkeypatch,
+            env={
+                "RAG_RERANKER_ENABLED": "true",
+                "RAG_RERANKER_MODEL": "local-zh-model",
+            },
+            build_reranker_override=lambda config: FakeReranker(),
+        ) as client:
+            search_body = client.post(
+                "/search", json={"query": "课程问题"}
+            ).json()
+            ask_body = client.post("/ask", json={"question": "课程问题"}).json()
+
+        assert not (search_body["reranker_applied"] and search_body["reranker_fallback"])
+        assert not (ask_body["reranker_applied"] and ask_body["reranker_fallback"])

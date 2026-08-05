@@ -39,12 +39,14 @@ from src.evaluation.reranking_runner import (
     FOCUS_CASE_IDS,
     run_reranking_evaluation,
 )
+from src.evaluation.reranking_models import RerankerRunIdentity
 from src.evaluation.runner import EmbeddingProtocol
 from src.exceptions import RagError
 from src.rag_service import DEFAULT_MIN_RELEVANCE_SCORE
 from src.reranker import (
     DEFAULT_CANDIDATE_TOP_K,
     MAX_CANDIDATE_TOP_K,
+    FakeReranker,
 )
 
 DEFAULT_MANIFEST = "eval/corpus_manifest.json"
@@ -189,6 +191,38 @@ def _validate_args(args: argparse.Namespace) -> list[str]:
     return errors
 
 
+def _build_run_identity(
+    reranker: object,
+    model_name: str,
+    *,
+    real_cross_encoder: bool,
+) -> RerankerRunIdentity:
+    """Build the explicit run provenance for this reranker instance.
+
+    ``real_cross_encoder`` is only true when the default factory successfully
+    constructed a real ``CrossEncoderReranker``.  Test substitutes and custom
+    factories always produce ``real_model_run=False`` so they can never
+    justify a production enable recommendation.
+    """
+    if real_cross_encoder:
+        return RerankerRunIdentity(
+            backend="cross_encoder",
+            real_model_run=True,
+            model_name=model_name,
+        )
+    if isinstance(reranker, FakeReranker):
+        return RerankerRunIdentity(
+            backend="fake",
+            real_model_run=False,
+            model_name=model_name,
+        )
+    return RerankerRunIdentity(
+        backend="custom",
+        real_model_run=False,
+        model_name=model_name,
+    )
+
+
 def _print_summary(run, output_dir: Path, root: Path) -> None:
     vm = run.vector_metrics
     rm = run.reranked_metrics
@@ -197,10 +231,14 @@ def _print_summary(run, output_dir: Path, root: Path) -> None:
     def fmt(v: float | None) -> str:
         return "N/A" if v is None else f"{v:.4f}"
 
+    identity = run.reranker_identity
     lines = [
         "RAG Reranking A/B 评估完成。",
         f"  Embedding 模型   : {run.configuration.embedding_model}",
         f"  Reranker 模型    : {run.configuration.reranker_model}",
+        f"  Reranker backend : {identity.backend}",
+        f"  Real model run   : {'是' if identity.real_model_run else '否'}",
+        f"  Model revision   : {identity.model_revision or 'N/A'}",
         f"  Candidate Top-K  : {run.configuration.candidate_top_k}",
         f"  Final Top-K      : {run.configuration.final_top_k}",
         f"  题目总数         : {len(run.cases)}",
@@ -219,6 +257,7 @@ def _print_summary(run, output_dir: Path, root: Path) -> None:
         "",
         f"  改善案例         : {len(run.improved_case_ids)}",
         f"  退化案例         : {len(run.regressed_case_ids)}",
+        f"  未变案例         : {len(run.unchanged_case_ids)}",
         f"  Reranker 应用数  : {run.reranker_applied_count}",
         f"  Reranker 回退数  : {run.reranker_fallback_count}",
         f"  决策一致性       : {'通过' if run.decision_invariance_passed else '未通过'}",
@@ -250,6 +289,10 @@ def main(
     root = repository_root()
     emb_factory = embedding_factory or default_embedding_factory
     rnk_factory = reranker_factory or default_reranker_factory
+    # Only the default factory constructs a real CrossEncoder; injected test
+    # substitutes are explicitly marked as not-real so they can never produce
+    # a production enable recommendation.
+    use_default_reranker_factory = reranker_factory is None
 
     manifest_path = _resolve_path(args.manifest, root)
     dataset_path = _resolve_path(args.dataset, root)
@@ -284,6 +327,12 @@ def main(
         )
         return EXIT_RERANKER_UNAVAILABLE
 
+    reranker_identity = _build_run_identity(
+        reranker,
+        args.reranker_model,
+        real_cross_encoder=use_default_reranker_factory,
+    )
+
     # Run evaluation
     try:
         run = run_reranking_evaluation(
@@ -300,6 +349,7 @@ def main(
             comparison_threshold=args.comparison_threshold,
             recommended_threshold=args.recommended_threshold,
             include_latency=args.include_latency,
+            reranker_identity=reranker_identity,
         )
     except (RagError, ValueError) as exc:
         print(f"评估执行失败: {exc}", file=sys.stderr)

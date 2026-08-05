@@ -39,6 +39,13 @@ CASES_CSV_COLUMNS: tuple[str, ...] = (
     "candidate_recall_at_5",
     "candidate_recall_at_10",
     "candidate_recall_at_15",
+    "candidate_max_retrieval_score",
+    "vector_max_retrieval_score",
+    "reranked_max_retrieval_score",
+    "vector_decision_at_comparison",
+    "reranked_decision_at_comparison",
+    "vector_decision_at_recommended",
+    "reranked_decision_at_recommended",
     "vector_first_relevant_rank",
     "vector_hit_at_1",
     "vector_hit_at_3",
@@ -162,6 +169,27 @@ def _build_summary(run: RerankingRun) -> dict[str, object]:
                     "candidate_hit_at_15": (
                         r.candidate.hit_at_15 if r.candidate else None
                     ),
+                    "candidate_max_retrieval_score": _round(
+                        r.candidate_max_retrieval_score
+                    ),
+                    "vector_max_retrieval_score": _round(
+                        r.vector_max_retrieval_score
+                    ),
+                    "reranked_max_retrieval_score": _round(
+                        r.reranked_max_retrieval_score
+                    ),
+                    "vector_decision_at_comparison": (
+                        r.vector_decision_at_comparison
+                    ),
+                    "reranked_decision_at_comparison": (
+                        r.reranked_decision_at_comparison
+                    ),
+                    "vector_decision_at_recommended": (
+                        r.vector_decision_at_recommended
+                    ),
+                    "reranked_decision_at_recommended": (
+                        r.reranked_decision_at_recommended
+                    ),
                     "vector_first_relevant_rank": (
                         r.vector.first_relevant_rank
                         if r.vector
@@ -184,6 +212,9 @@ def _build_summary(run: RerankingRun) -> dict[str, object]:
         "schema_version": SCHEMA_VERSION,
         "embedding_model": run.configuration.embedding_model,
         "reranker_model": run.configuration.reranker_model,
+        "reranker_backend": run.reranker_identity.backend,
+        "real_model_run": run.reranker_identity.real_model_run,
+        "reranker_model_revision": run.reranker_identity.model_revision,
         "candidate_top_k": run.configuration.candidate_top_k,
         "final_top_k": run.configuration.final_top_k,
         "dataset_counts": {
@@ -240,10 +271,12 @@ def _build_summary(run: RerankingRun) -> dict[str, object]:
                 run.decision_invariance_inconsistent_case_ids
             ),
             "note": (
-                "评估对每道题的 vector-only 与 reranked 分支拒答决策分别调用 "
-                "has_sufficient_context 执行真实断言检查（对比阈值与推荐阈值）。"
-                "当前生产实现设计上两分支共享候选池最高向量分数，决策应一致；"
-                "若任一阈值下两分支决策不一致，本检查会失败并阻止启用建议。"
+                "评估对每道题的 vector-only 与 reranked 分支分别独立计算"
+                "候选池最高向量分数（vector_max_retrieval_score / "
+                "reranked_max_retrieval_score），再调用生产函数 "
+                "has_sufficient_context 在对比阈值与推荐阈值下执行真实断言。"
+                "两分支分数由完整候选池独立导出；若重排阶段丢失候选或修改"
+                "检索分数导致两分支决策不一致，本检查会失败并阻止启用建议。"
             ),
         },
         "split_roles": [
@@ -284,10 +317,18 @@ def _build_summary(run: RerankingRun) -> dict[str, object]:
             "recommend_enable": run.recommend_enable,
             "reasons": list(run.recommendation_reasons),
             "note": (
-                "即使达到推荐标准，也不自动修改生产配置。"
-                "RAG_RERANKER_ENABLED 仍需人工评估后显式设置。"
+                "只有 backend=cross_encoder 且 real_model_run=true 的真实 "
+                "CrossEncoder 完整运行才可能产生启用建议；FakeReranker 或"
+                "测试替身永远不会产生生产启用建议。即使达到推荐标准，也"
+                "不自动修改生产配置。RAG_RERANKER_ENABLED 仍需人工评估后"
+                "显式设置。"
             ),
         },
+        "classification_note": (
+            "每个可回答问题必须且只能属于 improved / regressed / unchanged "
+            "之一；两个分支都未命中（vector 与 reranked 均 miss）的题目归入 "
+            "unchanged。不可回答题目不进入任何检索排名变化集合。"
+        ),
     }
 
 
@@ -320,10 +361,35 @@ def _write_cases_csv(run: RerankingRun, path: Path) -> None:
                 row["candidate_recall_at_5"] = _csv_optional_number(r.candidate.recall_at_5)
                 row["candidate_recall_at_10"] = _csv_optional_number(r.candidate.recall_at_10)
                 row["candidate_recall_at_15"] = _csv_optional_number(r.candidate.recall_at_15)
+                row["candidate_max_retrieval_score"] = _csv_optional_number(
+                    r.candidate_max_retrieval_score
+                )
             else:
                 for col in CASES_CSV_COLUMNS:
                     if col.startswith("candidate_"):
                         row[col] = ""
+            row["vector_max_retrieval_score"] = _csv_optional_number(
+                r.vector_max_retrieval_score
+            )
+            row["reranked_max_retrieval_score"] = _csv_optional_number(
+                r.reranked_max_retrieval_score
+            )
+            row["vector_decision_at_comparison"] = (
+                "" if r.vector_decision_at_comparison is None
+                else r.vector_decision_at_comparison
+            )
+            row["reranked_decision_at_comparison"] = (
+                "" if r.reranked_decision_at_comparison is None
+                else r.reranked_decision_at_comparison
+            )
+            row["vector_decision_at_recommended"] = (
+                "" if r.vector_decision_at_recommended is None
+                else r.vector_decision_at_recommended
+            )
+            row["reranked_decision_at_recommended"] = (
+                "" if r.reranked_decision_at_recommended is None
+                else r.reranked_decision_at_recommended
+            )
             if r.vector is not None:
                 row["vector_first_relevant_rank"] = _csv_optional_int(
                     r.vector.first_relevant_rank
@@ -394,6 +460,15 @@ def _write_report_md(run: RerankingRun, path: Path) -> None:
     lines.append("")
     lines.append(f"- Embedding 模型: `{run.configuration.embedding_model}`")
     lines.append(f"- Reranker 模型: `{run.configuration.reranker_model}`")
+    lines.append(f"- Reranker backend: `{run.reranker_identity.backend}`")
+    lines.append(
+        f"- Real model run: "
+        f"{'是' if run.reranker_identity.real_model_run else '否'}"
+    )
+    lines.append(
+        f"- Model revision: "
+        f"{run.reranker_identity.model_revision or 'N/A'}"
+    )
     lines.append(f"- Candidate Top-K: {run.configuration.candidate_top_k}")
     lines.append(f"- Final Top-K: {run.configuration.final_top_k}")
     lines.append(f"- 数据集题目数: {len(run.cases)}")
@@ -574,6 +649,23 @@ def _write_report_md(run: RerankingRun, path: Path) -> None:
         lines.append("无退化案例。")
     lines.append("")
 
+    # Unchanged cases
+    lines.append("## 未变案例")
+    lines.append("")
+    lines.append(
+        "- unchanged 包括两个分支排名相同，以及两个分支都未命中"
+        "（vector 与 reranked 均 miss）的案例。"
+    )
+    lines.append("- 每个可回答问题必须且只能属于 improved / regressed / unchanged 之一。")
+    if run.unchanged_case_ids:
+        lines.append(
+            f"- 未变案例（{len(run.unchanged_case_ids)}）: "
+            + ", ".join(run.unchanged_case_ids)
+        )
+    else:
+        lines.append("无未变案例。")
+    lines.append("")
+
     # Decision invariance
     lines.append("## 拒答决策一致性")
     lines.append("")
@@ -581,10 +673,11 @@ def _write_report_md(run: RerankingRun, path: Path) -> None:
         f"- 决策一致性检查: {'通过' if run.decision_invariance_passed else '未通过'}"
     )
     lines.append(
-        "- 对每个案例的 vector-only 与 reranked 分支分别调用生产函数 "
-        "has_sufficient_context 执行真实断言检查（对比阈值与推荐阈值）。"
-        "当前设计两分支共享候选池最高向量分数，预期一致；若任一阈值下不一致，"
-        "本检查会失败并阻止建议启用。"
+        "- 对每个案例分别独立计算 vector 分支与 reranked 分支的候选池最高"
+        "向量分数（vector_max_retrieval_score / reranked_max_retrieval_score），"
+        "再调用生产函数 has_sufficient_context 在对比阈值与推荐阈值下执行真实"
+        "断言。两分支分数均由完整候选池独立导出；若重排阶段丢失候选或修改"
+        "检索分数导致两分支决策不一致，本检查会失败并阻止启用建议。"
     )
     if run.decision_invariance_inconsistent_case_ids:
         lines.append(
@@ -653,6 +746,12 @@ def _write_report_md(run: RerankingRun, path: Path) -> None:
     lines.append("")
     for reason in run.recommendation_reasons:
         lines.append(f"- {reason}")
+    lines.append("")
+    lines.append(
+        "- 只有 backend=cross_encoder 且 real_model_run=true 的真实 "
+        "CrossEncoder 完整运行才可能产生启用建议；FakeReranker 或测试替身"
+        "永远不会产生生产启用建议。"
+    )
     lines.append("")
     lines.append("项目验收标准（非行业标准）：")
     lines.append(f"- Hit@1 绝对提升 >= {0.05}")

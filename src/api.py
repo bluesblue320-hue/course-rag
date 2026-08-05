@@ -50,9 +50,14 @@ from src.rag_service import (
 )
 from src.reranker import (
     RerankerConfig,
+    requested_reranker_enabled,
     resolve_reranker_config,
+    safe_reranker_model_display_name,
 )
 from src.retrieval_service import RetrievalService, build_reranker
+
+#: Public reranker readiness states exposed by /health.
+RerankerStatus = Literal["disabled", "ready", "load_failed", "config_invalid"]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 KNOWLEDGE_PATH = PROJECT_ROOT / "data" / "knowledge.txt"
@@ -149,37 +154,46 @@ def initialize_search(app: FastAPI) -> None:
     # Config resolution and model loading are kept separate so that a load
     # failure can be reported as `load_failed` instead of silently appearing
     # as "not enabled".  The health endpoint never leaks paths, stacks, or
-    # internal exception text.
+    # internal exception text, and the model name is redacted when it looks
+    # like a local path.
     reranker_instance = None
     retrieval_service: RetrievalService | None = None
     reranker_enabled = False
     reranker_ready = False
     reranker_model_name: str | None = None
-    reranker_status = "disabled"
+    reranker_status: RerankerStatus = "disabled"
 
-    try:
-        reranker_config = resolve_reranker_config(final_top_k=3)
-    except (ValueError, RagError):
+    # First resolve whether the user actually requested reranking.  When the
+    # enable flag itself cannot be parsed (e.g. RAG_RERANKER_ENABLED=maybe),
+    # the system cannot confirm a request to enable, so the public
+    # `reranker_enabled` stays false while the status becomes config_invalid.
+    requested_enable = requested_reranker_enabled()
+    if requested_enable is None:
         reranker_status = "config_invalid"
     else:
-        reranker_enabled = reranker_config.enabled
-        reranker_model_name = reranker_config.model_name or None
-        if not reranker_config.enabled:
-            reranker_status = "disabled"
+        reranker_enabled = requested_enable
+        try:
+            reranker_config = resolve_reranker_config(final_top_k=3)
+        except (ValueError, RagError):
+            reranker_status = "config_invalid"
         else:
-            try:
-                reranker_instance = build_reranker(reranker_config)
-                retrieval_service = RetrievalService(
-                    retriever=index,
-                    config=reranker_config,
-                    reranker=reranker_instance,
-                )
-                reranker_ready = retrieval_service.reranker_ready
-                reranker_status = "ready" if reranker_ready else "load_failed"
-            except Exception:
-                # Model present in config but could not be loaded (missing,
-                # corrupt, offline-only miss, etc.).  Keep vector-only path.
-                reranker_status = "load_failed"
+            reranker_model_name = reranker_config.model_name or None
+            if not reranker_config.enabled:
+                reranker_status = "disabled"
+            else:
+                try:
+                    reranker_instance = build_reranker(reranker_config)
+                    retrieval_service = RetrievalService(
+                        retriever=index,
+                        config=reranker_config,
+                        reranker=reranker_instance,
+                    )
+                    reranker_ready = retrieval_service.reranker_ready
+                    reranker_status = "ready" if reranker_ready else "load_failed"
+                except Exception:
+                    # Model present in config but could not be loaded (missing,
+                    # corrupt, offline-only miss, etc.).  Keep vector-only path.
+                    reranker_status = "load_failed"
 
     app.state.retrieval_service = retrieval_service
     app.state.reranker_enabled = reranker_enabled
@@ -250,7 +264,7 @@ class HealthResponse(BaseModel):
     reranker_enabled: bool = False
     reranker_ready: bool = False
     reranker_model: str | None = None
-    reranker_status: str = "disabled"
+    reranker_status: RerankerStatus = "disabled"
 
 
 class SearchRequest(BaseModel):
@@ -292,6 +306,9 @@ class SearchResponse(BaseModel):
     indexed_chunks: int
     model: str
     results: list[SearchResultResponse]
+    # Whether this request actually used the reranker (or fell back).
+    reranker_applied: bool = False
+    reranker_fallback: bool = False
 
 
 class AskRequest(BaseModel):
@@ -341,6 +358,9 @@ class AskResponse(BaseModel):
     embedding_model: str
     llm_model: str
     sources: list[AskSourceResponse]
+    # Whether this request actually used the reranker (or fell back).
+    reranker_applied: bool = False
+    reranker_fallback: bool = False
 
 
 class DocumentResponse(BaseModel):
@@ -563,6 +583,9 @@ async def handle_document_ingestion_error(
 @app.get("/health", response_model=HealthResponse)
 def health(request: Request) -> HealthResponse:
     """Return readiness for retrieval and answer generation."""
+    # The model name is redacted through safe_reranker_model_display_name so a
+    # local absolute path in the configuration never leaks into the payload.
+    raw_reranker_model = getattr(request.app.state, "reranker_model", None)
     return HealthResponse(
         status="ok",
         chunk_count=request.app.state.chunk_count,
@@ -572,7 +595,7 @@ def health(request: Request) -> HealthResponse:
         min_relevance_score=request.app.state.min_relevance_score,
         reranker_enabled=getattr(request.app.state, "reranker_enabled", False),
         reranker_ready=getattr(request.app.state, "reranker_ready", False),
-        reranker_model=getattr(request.app.state, "reranker_model", None),
+        reranker_model=safe_reranker_model_display_name(raw_reranker_model),
         reranker_status=getattr(request.app.state, "reranker_status", "disabled"),
     )
 
@@ -585,12 +608,16 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
         payload.query
     )
     retrieval_service = getattr(request.app.state, "retrieval_service", None)
+    reranker_applied = False
+    reranker_fallback = False
     if retrieval_service is not None:
         outcome = retrieval_service.retrieve(
             query_embedding,
             payload.query,
             final_top_k=payload.top_k,
         )
+        reranker_applied = outcome.reranker_applied
+        reranker_fallback = outcome.reranker_fallback
         results = [
             {
                 "rank": chunk.final_rank,
@@ -618,6 +645,8 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
         indexed_chunks=request.app.state.chunk_count,
         model=request.app.state.model_name,
         results=[SearchResultResponse(**result) for result in results],
+        reranker_applied=reranker_applied,
+        reranker_fallback=reranker_fallback,
     )
 
 

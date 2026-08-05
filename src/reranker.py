@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
@@ -35,6 +36,9 @@ RERANKER_ENABLED_ERROR = "RAG_RERANKER_ENABLED 必须是布尔值 (true/false)"
 DEFAULT_CANDIDATE_TOP_K = 15
 MAX_CANDIDATE_TOP_K = 100
 MIN_CANDIDATE_TOP_K = 5
+
+#: Public display name used when a configured model looks like a local path.
+LOCAL_MODEL_DISPLAY = "<local-model>"
 
 
 @dataclass(frozen=True)
@@ -100,6 +104,54 @@ def _parse_bool(value: str) -> bool:
     if lowered in ("false", "0", "no"):
         return False
     raise ValueError(RERANKER_ENABLED_ERROR)
+
+
+def requested_reranker_enabled() -> bool | None:
+    """Return whether the user requested reranking from the environment.
+
+    Returns ``None`` when ``RAG_RERANKER_ENABLED`` is present but cannot be
+    parsed as a boolean.  In that case the system cannot confirm a request to
+    enable, so the public ``reranker_enabled`` field stays ``false`` while
+    ``reranker_status`` becomes ``config_invalid``.
+    """
+    raw_enabled = os.getenv("RAG_RERANKER_ENABLED", "false")
+    try:
+        return _parse_bool(raw_enabled)
+    except ValueError:
+        return None
+
+
+def safe_reranker_model_display_name(raw_model: str | None) -> str | None:
+    """Return a public-safe display name for a configured reranker model.
+
+    Hugging Face style identifiers (``org/name``) are kept as-is.  Anything
+    that looks like a local path — POSIX absolute, Windows absolute or UNC,
+    ``file://`` URI, or ``~``-relative — is replaced by ``<local-model>`` so
+    public responses never leak usernames, drive letters, cache directories,
+    or project paths.  Model loading itself keeps using the original value.
+    """
+    if not raw_model:
+        return None
+    value = raw_model.strip()
+    if not value:
+        return None
+    # file:// URI (e.g. file:///home/user/.cache/models/foo)
+    if value.lower().startswith("file://"):
+        return LOCAL_MODEL_DISPLAY
+    # Windows absolute path: C:\... or C:/... or drive-relative C:name
+    if re.match(r"^[A-Za-z]:[\\/]", value) or re.match(r"^[A-Za-z]:", value):
+        return LOCAL_MODEL_DISPLAY
+    # Windows UNC path: \\server\share\...
+    if value.startswith("\\\\"):
+        return LOCAL_MODEL_DISPLAY
+    # POSIX absolute path or home-relative path
+    if value.startswith("/") or value.startswith("~"):
+        return LOCAL_MODEL_DISPLAY
+    # Any backslash is a local Windows-style relative path.
+    if "\\" in value:
+        return LOCAL_MODEL_DISPLAY
+    # Everything else is treated as a model identifier (e.g. BAAI/bge-...).
+    return value
 
 
 def resolve_reranker_config(

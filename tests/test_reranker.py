@@ -13,13 +13,16 @@ from src.reranker import (
     RERANKER_CANDIDATE_TOP_K_ERROR,
     RERANKER_ENABLED_ERROR,
     RERANKER_MODEL_ERROR,
+    LOCAL_MODEL_DISPLAY,
     RerankInput,
     RerankScore,
     RerankerConfig,
     _to_finite_float,
     _validate_rerank_scores,
+    requested_reranker_enabled,
     resolve_reranker_config,
     safe_rerank,
+    safe_reranker_model_display_name,
 )
 
 
@@ -406,3 +409,84 @@ class TestCrossEncoderRerankerImport:
 
         with pytest.raises(FileNotFoundError):
             CrossEncoderReranker("not-cached-model")
+
+
+# ---------------------------------------------------------------------------
+# Health-safe model display name (Fix 3, round 2)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeRerankerModelDisplayName:
+    def test_empty_returns_none(self) -> None:
+        assert safe_reranker_model_display_name(None) is None
+        assert safe_reranker_model_display_name("") is None
+        assert safe_reranker_model_display_name("   ") is None
+
+    def test_huggingface_id_kept(self) -> None:
+        assert (
+            safe_reranker_model_display_name("BAAI/bge-reranker-v2-m3")
+            == "BAAI/bge-reranker-v2-m3"
+        )
+
+    def test_plain_name_kept(self) -> None:
+        assert safe_reranker_model_display_name("local-zh-model") == "local-zh-model"
+
+    def test_posix_absolute_path_redacted(self) -> None:
+        raw = "/home/user/.cache/models/my-reranker"
+        assert safe_reranker_model_display_name(raw) == LOCAL_MODEL_DISPLAY
+
+    def test_windows_absolute_path_redacted(self) -> None:
+        raw = "C:\\Users\\name\\.cache\\models\\my-reranker"
+        assert safe_reranker_model_display_name(raw) == LOCAL_MODEL_DISPLAY
+
+    def test_windows_forward_slash_path_redacted(self) -> None:
+        raw = "C:/Users/name/.cache/models/my-reranker"
+        assert safe_reranker_model_display_name(raw) == LOCAL_MODEL_DISPLAY
+
+    def test_unc_path_redacted(self) -> None:
+        raw = "\\\\server\\share\\models\\my-reranker"
+        assert safe_reranker_model_display_name(raw) == LOCAL_MODEL_DISPLAY
+
+    def test_file_uri_redacted(self) -> None:
+        raw = "file:///home/user/.cache/models/my-reranker"
+        assert safe_reranker_model_display_name(raw) == LOCAL_MODEL_DISPLAY
+
+    def test_tilde_path_redacted(self) -> None:
+        raw = "~/.cache/models/my-reranker"
+        assert safe_reranker_model_display_name(raw) == LOCAL_MODEL_DISPLAY
+
+    def test_no_username_or_drive_leak(self) -> None:
+        for raw in (
+            "C:\\Users\\secret-user\\.cache\\models\\my-reranker",
+            "/home/secret-user/.cache/models/my-reranker",
+            "file:///home/secret-user/.cache/models/my-reranker",
+            "~/.cache/models/my-reranker",
+        ):
+            out = safe_reranker_model_display_name(raw)
+            assert out == LOCAL_MODEL_DISPLAY
+            assert "secret-user" not in out
+            assert "C:" not in out
+            assert ".cache" not in out
+
+
+# ---------------------------------------------------------------------------
+# Enable-flag parsing (Fix 3, round 2)
+# ---------------------------------------------------------------------------
+
+
+class TestRequestedRerankerEnabled:
+    def test_true(self, monkeypatch) -> None:
+        monkeypatch.setenv("RAG_RERANKER_ENABLED", "true")
+        assert requested_reranker_enabled() is True
+
+    def test_false(self, monkeypatch) -> None:
+        monkeypatch.setenv("RAG_RERANKER_ENABLED", "false")
+        assert requested_reranker_enabled() is False
+
+    def test_default_false_when_unset(self, monkeypatch) -> None:
+        monkeypatch.delenv("RAG_RERANKER_ENABLED", raising=False)
+        assert requested_reranker_enabled() is False
+
+    def test_unparseable_returns_none(self, monkeypatch) -> None:
+        monkeypatch.setenv("RAG_RERANKER_ENABLED", "maybe")
+        assert requested_reranker_enabled() is None

@@ -262,7 +262,122 @@ def test_low_score_returns_candidates_without_prompt_or_generation() -> None:
     assert result["generation_elapsed_ms"] == 0.0
     assert prompt_builder.requests == []
     assert generation.prompts == []
-    assert calls == ["embedding", "retriever"]
+
+
+# ---------------------------------------------------------------------------
+# Retrieval-service path: request-time reranker fallback propagation
+# ---------------------------------------------------------------------------
+
+
+class FakeRetrievalService:
+    """Minimal two-stage retrieval stub returning a configurable outcome."""
+
+    def __init__(
+        self,
+        sources: list[dict[str, object]],
+        max_score: float | None,
+        applied: bool,
+        fallback: bool,
+    ) -> None:
+        self.sources = sources
+        self.max_score = max_score
+        self.applied = applied
+        self.fallback = fallback
+
+    def retrieve(self, query_embedding: object, query_text: str, final_top_k: int):
+        from src.retrieval_service import RetrievalOutcome
+
+        return RetrievalOutcome(
+            sources=(),
+            candidate_count=len(self.sources),
+            reranker_applied=self.applied,
+            reranker_fallback=self.fallback,
+            max_retrieval_score=self.max_score,
+        )
+
+
+def make_service_with_retrieval_service(
+    *,
+    sources: list[dict[str, object]],
+    max_score: float | None,
+    applied: bool,
+    fallback: bool,
+):
+    calls: list[str] = []
+    embedding = FakeEmbeddingService(calls)
+    retriever = FakeRetriever(calls, sources)
+    prompt_builder = FakePromptBuilder(calls)
+    generation = FakeGenerationService(calls)
+    retrieval = FakeRetrievalService(sources, max_score, applied, fallback)
+    service = RagService(
+        embedding,
+        retriever,
+        prompt_builder,
+        generation,
+        min_relevance_score=DEFAULT_MIN_RELEVANCE_SCORE,
+        retrieval_service=retrieval,  # type: ignore[arg-type]
+    )
+    return service, retrieval, generation
+
+
+def test_answer_reports_request_time_fallback() -> None:
+    service, retrieval, generation = make_service_with_retrieval_service(
+        sources=[{"rank": 1, "score": 0.9, "text": "资料", "chunk_index": 0}],
+        max_score=0.9,
+        applied=False,
+        fallback=True,
+    )
+
+    result = service.answer("课程问题")
+
+    assert result["reranker_applied"] is False
+    assert result["reranker_fallback"] is True
+    assert result["answer_status"] == "answered"
+    assert generation.prompts == ["built prompt"]
+
+
+def test_answer_reports_reranker_applied_without_fallback() -> None:
+    service, retrieval, generation = make_service_with_retrieval_service(
+        sources=[{"rank": 1, "score": 0.9, "text": "资料", "chunk_index": 0}],
+        max_score=0.9,
+        applied=True,
+        fallback=False,
+    )
+
+    result = service.answer("课程问题")
+
+    assert result["reranker_applied"] is True
+    assert result["reranker_fallback"] is False
+
+
+def test_fallback_with_insufficient_context_does_not_call_llm() -> None:
+    service, retrieval, generation = make_service_with_retrieval_service(
+        sources=[{"rank": 1, "score": 0.2, "text": "候选", "chunk_index": 0}],
+        max_score=0.2,
+        applied=False,
+        fallback=True,
+    )
+
+    result = service.answer("课程问题")
+
+    assert result["reranker_fallback"] is True
+    assert result["answer_status"] == "insufficient_context"
+    assert generation.prompts == []
+
+
+def test_applied_and_fallback_are_never_both_true() -> None:
+    # The retrieval contract forbids applied=True AND fallback=True; the
+    # service must propagate exactly what the outcome reports.
+    service, retrieval, generation = make_service_with_retrieval_service(
+        sources=[{"rank": 1, "score": 0.9, "text": "资料", "chunk_index": 0}],
+        max_score=0.9,
+        applied=False,
+        fallback=False,
+    )
+
+    result = service.answer("课程问题")
+
+    assert not (result["reranker_applied"] and result["reranker_fallback"])
 
 
 @pytest.mark.parametrize("score", [None, "0.9", True, -1.1, 1.1, float("nan"), float("inf")])

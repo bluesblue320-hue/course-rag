@@ -17,6 +17,8 @@ from src.evaluation.reranking_models import (
     BranchResult,
     CandidateResult,
     RerankingCaseResult,
+    RerankerRunIdentity,
+    classify_rank_change,
 )
 from src.evaluation.reranking_runner import (
     _build_candidate_result,
@@ -30,6 +32,24 @@ from tests.evaluation_helpers import (
     make_case,
     make_expectation,
 )
+
+
+def real_identity(model_name: str = "real-model") -> RerankerRunIdentity:
+    """Identity for a successfully loaded real CrossEncoder."""
+    return RerankerRunIdentity(
+        backend="cross_encoder",
+        real_model_run=True,
+        model_name=model_name,
+    )
+
+
+def fake_identity(model_name: str = "fake-reranker") -> RerankerRunIdentity:
+    """Identity for a FakeReranker / test substitute."""
+    return RerankerRunIdentity(
+        backend="fake",
+        real_model_run=False,
+        model_name=model_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +380,8 @@ class TestRunnerMetrics:
             + len(run.regressed_case_ids)
             + len(run.unchanged_case_ids)
         )
-        # Should account for all answerable cases (may be less if some missed)
-        assert total <= 3  # 3 answerable cases
+        # Every answerable case belongs to exactly one set.
+        assert total == 3  # 3 answerable cases
 
     def test_grouped_by_category(self) -> None:
         embedding = FakeEmbeddingService()
@@ -733,7 +753,8 @@ class TestFallbackGating:
         vm = _branch_metrics(0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5)
         rm = _branch_metrics(0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9)
         ok, reasons = _evaluate_recommendation(
-            vm, rm, {}, {}, 0, True, "real-model", reranker_fallback_count=1
+            vm, rm, {}, {}, 0, True, real_identity(),
+            reranker_fallback_count=1,
         )
         assert ok is False
         assert any("回退" in r for r in reasons)
@@ -745,7 +766,396 @@ class TestFallbackGating:
         # With empty category groups the metrics gate fails for a non-fallback
         # reason; the fallback gate must NOT be the blocker.
         ok, reasons = _evaluate_recommendation(
-            vm, rm, {}, {}, 0, True, "real-model", reranker_fallback_count=0
+            vm, rm, {}, {}, 0, True, real_identity(),
+            reranker_fallback_count=0,
         )
         assert ok is False
         assert not any("回退" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 (round 2): real-model provenance gating
+# ---------------------------------------------------------------------------
+
+
+class TestRealModelGating:
+    def test_fake_reranker_with_great_metrics_never_recommends(self) -> None:
+        vm = _branch_metrics(0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
+        rm = _branch_metrics(0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99)
+        ok, reasons = _evaluate_recommendation(
+            vm, rm, {}, {}, 0, True, fake_identity()
+        )
+        assert ok is False
+        assert "未使用真实 CrossEncoder" in reasons[0]
+
+    def test_fake_reranker_with_fake_real_model_name_never_recommends(self) -> None:
+        # A fake reranker pretending to be a real model name must still fail.
+        vm = _branch_metrics(0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
+        rm = _branch_metrics(0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99)
+        ok, reasons = _evaluate_recommendation(
+            vm, rm, {}, {}, 0, True,
+            fake_identity(model_name="BAAI/bge-reranker-v2-m3"),
+        )
+        assert ok is False
+        assert "未使用真实 CrossEncoder" in reasons[0]
+
+    def test_custom_backend_never_recommends(self) -> None:
+        identity = RerankerRunIdentity(
+            backend="custom",
+            real_model_run=False,
+            model_name="custom-thing",
+        )
+        vm = _branch_metrics(0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
+        rm = _branch_metrics(0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99)
+        ok, reasons = _evaluate_recommendation(vm, rm, {}, {}, 0, True, identity)
+        assert ok is False
+        assert "未使用真实 CrossEncoder" in reasons[0]
+
+    def test_cross_encoder_but_real_model_run_false_never_recommends(self) -> None:
+        identity = RerankerRunIdentity(
+            backend="cross_encoder",
+            real_model_run=False,
+            model_name="real-model",
+        )
+        vm = _branch_metrics(0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
+        rm = _branch_metrics(0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99)
+        ok, reasons = _evaluate_recommendation(vm, rm, {}, {}, 0, True, identity)
+        assert ok is False
+        assert "未使用真实 CrossEncoder" in reasons[0]
+
+    def test_real_cross_encoder_proceeds_to_metric_gates(self) -> None:
+        # Real identity passes the provenance gate; with empty category groups
+        # the next blocker is a metric gate (paraphrase missing), not identity.
+        vm = _branch_metrics(0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
+        rm = _branch_metrics(0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9)
+        ok, reasons = _evaluate_recommendation(
+            vm, rm, {}, {}, 0, True, real_identity()
+        )
+        assert ok is False
+        assert not any("未使用真实 CrossEncoder" in r for r in reasons)
+        assert not any("不是 CrossEncoder" in r for r in reasons)
+
+    def test_fallback_blocks_even_real_model(self) -> None:
+        vm = _branch_metrics(0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2)
+        rm = _branch_metrics(0.99, 0.99, 0.99, 0.99, 0.99, 0.99, 0.99)
+        ok, reasons = _evaluate_recommendation(
+            vm, rm, {}, {}, 0, True, real_identity(),
+            reranker_fallback_count=2,
+        )
+        assert ok is False
+        assert "Reranker 在 2 个案例" in reasons[0]
+
+    def test_decision_invariance_failure_blocks_even_real_model(self) -> None:
+        # Provide category metrics so every metric gate passes and the only
+        # remaining blocker is the decision-invariance failure.
+        from src.evaluation.reranking_metrics import BranchMetrics as BM
+
+        def cat(mrr: float) -> BM:
+            return BM(
+                case_count=1,
+                hit_at_1=0.9,
+                hit_at_3=0.9,
+                hit_at_5=0.9,
+                recall_at_1=0.9,
+                recall_at_3=0.9,
+                recall_at_5=0.9,
+                mean_reciprocal_rank=mrr,
+            )
+
+        vm = _branch_metrics(0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5)
+        rm = _branch_metrics(0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9)
+        ok, reasons = _evaluate_recommendation(
+            vm,
+            rm,
+            {"paraphrase": cat(0.5), "direct": cat(0.5)},
+            {"paraphrase": cat(0.9), "direct": cat(0.9)},
+            0,
+            False,
+            real_identity(),
+        )
+        assert ok is False
+        assert "决策一致性" in " ".join(reasons)
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 (round 2): full-runner decision invariance genuinely fail-able
+# ---------------------------------------------------------------------------
+
+
+def _drift_corpus_chunks():
+    """Corpus where the top retrieval hit is unmistakable.
+
+    The evidence chunk text is identical to the question, so its cosine
+    similarity is 1.0 (well above the 0.35 comparison threshold), while every
+    other chunk is disjoint (cosine ~0).  Dropping the top chunk in the
+    reranked branch therefore flips the reranked refusal decision.
+    """
+    from src.documents import ChunkRecord
+
+    return (
+        ChunkRecord(
+            chunk_id="c0",
+            document_id="doc-ev",
+            filename="evidence.md",
+            text="身份标识短语",
+            chunk_index=0,
+            page_number=None,
+        ),
+        ChunkRecord(
+            chunk_id="c1",
+            document_id="doc-other",
+            filename="other.md",
+            text="互不相干内容乙丙丁戊",
+            chunk_index=1,
+            page_number=None,
+        ),
+        ChunkRecord(
+            chunk_id="c2",
+            document_id="doc-other",
+            filename="other.md",
+            text="完全不同内容子丑寅卯",
+            chunk_index=2,
+            page_number=None,
+        ),
+    )
+
+
+def _drift_case() -> EvaluationCase:
+    return make_case(
+        "t-drift",
+        "calibration",
+        "身份标识短语",
+        True,
+        "direct",
+        "easy",
+        [make_expectation(document_id="doc-ev", required_terms=("身份标识短语",))],
+    )
+
+
+class TestRunnerDecisionInvarianceNegative:
+    def test_lost_top_candidate_makes_runner_check_fail(self, monkeypatch) -> None:
+        from src.evaluation import reranking_runner as runner_module
+
+        def dropping_rerank(reranker, query, candidates):
+            # Simulate the reranking stage silently losing the highest
+            # retrieval-score candidate while reporting no fallback.
+            sorted_cands = sorted(
+                candidates, key=lambda c: float(c["score"]), reverse=True
+            )
+            kept = sorted_cands[1:] if sorted_cands else []
+            return kept, False
+
+        monkeypatch.setattr(
+            runner_module, "_rerank_candidates", dropping_rerank
+        )
+        run = run_reranking_evaluation(
+            cases=(_drift_case(),),
+            corpus_chunks=_drift_corpus_chunks(),
+            embedding_service=FakeEmbeddingService(),
+            embedding_model="fake",
+            reranker=FakeReranker(),
+            reranker_model="fake-reranker",
+            manifest_path="m",
+            dataset_path="d",
+            candidate_top_k=15,
+            final_top_k=5,
+            comparison_threshold=0.35,
+            recommended_threshold=0.49,
+        )
+
+        # The vector max retrieval score is 1.0; the reranked branch lost the
+        # top candidate, so its max is ~0 and the decisions diverge.
+        result = run.results[0]
+        assert result.vector_max_retrieval_score is not None
+        assert result.vector_max_retrieval_score >= 0.99
+        assert result.reranked_max_retrieval_score is not None
+        assert result.reranked_max_retrieval_score < 0.35
+        assert result.vector_decision_at_comparison is True
+        assert result.reranked_decision_at_comparison is False
+
+        assert run.decision_invariance_passed is False
+        assert "t-drift" in run.decision_invariance_inconsistent_case_ids
+        assert run.recommend_enable is False
+
+    def test_corrupted_retrieval_score_makes_runner_check_fail(
+        self, monkeypatch
+    ) -> None:
+        from src.evaluation import reranking_runner as runner_module
+
+        def corrupting_rerank(reranker, query, candidates):
+            # Simulate the reranking stage overwriting retrieval scores with
+            # low values while returning the same candidate set (no fallback).
+            corrupted = [
+                {**c, "score": 0.1} for c in candidates
+            ]
+            return corrupted, False
+
+        monkeypatch.setattr(
+            runner_module, "_rerank_candidates", corrupting_rerank
+        )
+        run = run_reranking_evaluation(
+            cases=(_drift_case(),),
+            corpus_chunks=_drift_corpus_chunks(),
+            embedding_service=FakeEmbeddingService(),
+            embedding_model="fake",
+            reranker=FakeReranker(),
+            reranker_model="fake-reranker",
+            manifest_path="m",
+            dataset_path="d",
+            candidate_top_k=15,
+            final_top_k=5,
+            comparison_threshold=0.35,
+            recommended_threshold=0.49,
+        )
+
+        assert run.decision_invariance_passed is False
+        assert "t-drift" in run.decision_invariance_inconsistent_case_ids
+        assert run.recommend_enable is False
+
+    def test_runner_positive_still_passes_with_real_identity(self) -> None:
+        """Normal data flow keeps passing even with a real identity."""
+        run = run_reranking_evaluation(
+            cases=make_test_cases(),
+            corpus_chunks=make_corpus_chunks(),
+            embedding_service=FakeEmbeddingService(),
+            embedding_model="fake",
+            reranker=FakeReranker(),
+            reranker_model="fake-reranker",
+            manifest_path="manifest",
+            dataset_path="dataset",
+            candidate_top_k=15,
+            final_top_k=5,
+            comparison_threshold=0.35,
+            recommended_threshold=0.49,
+            reranker_identity=real_identity("fake-reranker"),
+        )
+        assert run.decision_invariance_passed is True
+        assert run.decision_invariance_inconsistent_case_ids == ()
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 (round 2): complete rank-change classification
+# ---------------------------------------------------------------------------
+
+
+class TestRankClassification:
+    def test_equal_ranks_unchanged(self) -> None:
+        c = classify_rank_change(1, 1, answerable=True)
+        assert (c.improved, c.regressed, c.unchanged) == (False, False, True)
+        assert c.rank_change == 0
+
+    def test_improved(self) -> None:
+        c = classify_rank_change(3, 1, answerable=True)
+        assert (c.improved, c.regressed, c.unchanged) == (True, False, False)
+        assert c.rank_change == -2
+
+    def test_regressed(self) -> None:
+        c = classify_rank_change(1, 3, answerable=True)
+        assert (c.improved, c.regressed, c.unchanged) == (False, True, False)
+        assert c.rank_change == 2
+
+    def test_vector_miss_reranked_hit_improved(self) -> None:
+        c = classify_rank_change(None, 2, answerable=True)
+        assert (c.improved, c.regressed, c.unchanged) == (True, False, False)
+        assert c.rank_change is None
+
+    def test_vector_hit_reranked_miss_regressed(self) -> None:
+        c = classify_rank_change(2, None, answerable=True)
+        assert (c.improved, c.regressed, c.unchanged) == (False, True, False)
+        assert c.rank_change is None
+
+    def test_both_miss_answerable_unchanged(self) -> None:
+        c = classify_rank_change(None, None, answerable=True)
+        assert (c.improved, c.regressed, c.unchanged) == (False, False, True)
+        assert c.rank_change is None
+
+    def test_both_miss_unanswerable_not_classified(self) -> None:
+        c = classify_rank_change(None, None, answerable=False)
+        assert (c.improved, c.regressed, c.unchanged) == (False, False, False)
+        assert c.rank_change is None
+
+
+class TestClassificationCompleteness:
+    def test_sets_are_disjoint_and_cover_all_answerable_cases(self) -> None:
+        run = run_reranking_evaluation(
+            cases=make_test_cases(),
+            corpus_chunks=make_corpus_chunks(),
+            embedding_service=FakeEmbeddingService(),
+            embedding_model="fake",
+            reranker=FakeReranker(),
+            reranker_model="fake-reranker",
+            manifest_path="manifest",
+            dataset_path="dataset",
+            candidate_top_k=15,
+            final_top_k=5,
+            comparison_threshold=0.35,
+            recommended_threshold=0.49,
+        )
+        answerable_ids = {
+            r.case_id for r in run.results if r.answerable
+        }
+        improved = set(run.improved_case_ids)
+        regressed = set(run.regressed_case_ids)
+        unchanged = set(run.unchanged_case_ids)
+
+        # Pairwise disjoint
+        assert improved & regressed == set()
+        assert improved & unchanged == set()
+        assert regressed & unchanged == set()
+        # Union covers every answerable case exactly once.
+        union = improved | regressed | unchanged
+        assert union == answerable_ids
+        assert len(improved) + len(regressed) + len(unchanged) == len(
+            answerable_ids
+        )
+
+    def test_both_miss_cases_land_in_unchanged(self) -> None:
+        """Forcing both branches to miss must still classify as unchanged."""
+        from src.evaluation import reranking_runner as runner_module
+
+        # Evidence terms that never appear in any corpus chunk: both branches
+        # miss, and the case must still be classified as unchanged.
+        case = make_case(
+            "t-both-miss",
+            "calibration",
+            "一个普通问题？",
+            True,
+            "direct",
+            "easy",
+            [make_expectation(document_id="doc-a", required_terms=("绝不存在的术语",))],
+        )
+
+        def missing_rerank(reranker, query, candidates):
+            # Return candidates that cannot match the evidence: empty pool.
+            return [], False
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            runner_module, "_rerank_candidates", missing_rerank
+        )
+        try:
+            run = run_reranking_evaluation(
+                cases=(case,),
+                corpus_chunks=make_corpus_chunks(),
+                embedding_service=FakeEmbeddingService(),
+                embedding_model="fake",
+                reranker=FakeReranker(),
+                reranker_model="fake-reranker",
+                manifest_path="m",
+                dataset_path="d",
+                candidate_top_k=15,
+                final_top_k=5,
+                comparison_threshold=0.35,
+                recommended_threshold=0.49,
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert run.unchanged_case_ids == ("t-both-miss",)
+        assert run.improved_case_ids == ()
+        assert run.regressed_case_ids == ()
+        # Both branches report a miss, yet the case is still classified.
+        result = run.results[0]
+        assert result.vector.first_relevant_rank is None
+        assert result.reranked.first_relevant_rank is None
+        assert result.unchanged is True

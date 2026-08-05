@@ -15,6 +15,7 @@ from src.evaluation.reranking_metrics import (
 from src.evaluation.reranking_models import (
     CandidateResult,
     RerankingCaseResult,
+    RerankerRunIdentity,
 )
 from src.evaluation.reranking_report import write_reranking_reports
 from src.evaluation.reranking_runner import RerankingRun, RerankingRunConfiguration
@@ -83,6 +84,12 @@ def _make_run(
         question="问题？",
         candidate=candidate,
         max_retrieval_score=0.5,
+        vector_max_retrieval_score=0.5,
+        reranked_max_retrieval_score=0.5,
+        vector_decision_at_comparison=True,
+        reranked_decision_at_comparison=True,
+        vector_decision_at_recommended=True,
+        reranked_decision_at_recommended=True,
         candidate_count=15,
         vector=None,
         reranked=None,
@@ -122,6 +129,11 @@ def _make_run(
         reranker_applied_count=1,
         reranker_fallback_count=0,
         reranker_fallback_rate=0.0,
+        reranker_identity=RerankerRunIdentity(
+            backend="fake",
+            real_model_run=False,
+            model_name="fake-reranker",
+        ),
         recommend_enable=False,
         recommendation_reasons=("示例原因",),
         latency_records=(),
@@ -181,3 +193,45 @@ class TestDecisionInvarianceReport:
         assert "p-010" in report
         assert "必然一致" not in report
         assert "不一致案例" in report
+
+
+class TestRunProvenanceReport:
+    def test_summary_exposes_backend_and_real_model_run(self, tmp_path: Path) -> None:
+        write_reranking_reports(_make_run(), tmp_path)
+        summary = json.loads(
+            (tmp_path / "summary.json").read_text(encoding="utf-8")
+        )
+        assert summary["reranker_backend"] == "fake"
+        assert summary["real_model_run"] is False
+        assert summary["reranker_model_revision"] is None
+        assert "classification_note" in summary
+        assert "unchanged" in summary["classification_note"]
+
+    def test_report_md_lists_backend_and_real_model_run(
+        self, tmp_path: Path
+    ) -> None:
+        write_reranking_reports(_make_run(), tmp_path)
+        report = (tmp_path / "report.md").read_text(encoding="utf-8")
+        assert "Reranker backend" in report
+        assert "Real model run" in report
+        assert "两个分支都未命中" in report
+        assert "未变案例" in report
+
+    def test_cases_csv_has_independent_max_scores(self, tmp_path: Path) -> None:
+        write_reranking_reports(_make_run(), tmp_path)
+        with open(tmp_path / "cases.csv", encoding="utf-8-sig", newline="") as f:
+            reader = csv.DictReader(f)
+            header = reader.fieldnames
+            row = next(reader)
+        assert header is not None
+        for col in (
+            "candidate_max_retrieval_score",
+            "vector_max_retrieval_score",
+            "reranked_max_retrieval_score",
+            "vector_decision_at_comparison",
+            "reranked_decision_at_comparison",
+        ):
+            assert col in header
+        assert row["candidate_max_retrieval_score"] == "0.5"
+        assert row["vector_max_retrieval_score"] == "0.5"
+        assert row["reranked_max_retrieval_score"] == "0.5"

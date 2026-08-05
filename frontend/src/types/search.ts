@@ -25,6 +25,10 @@ export interface SearchResponse {
   indexed_chunks: number
   model: string
   results: SearchResult[]
+  /** Whether this request actually used the reranker ordering. */
+  reranker_applied?: boolean
+  /** Whether the reranker fell back to vector-only ordering for this request. */
+  reranker_fallback?: boolean
 }
 
 export type SearchState =

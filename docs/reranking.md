@@ -36,6 +36,60 @@ Reranker（第二阶段排序器），对更大的候选池进行精排：
 API 响应中，`score` 字段继续代表 `retrieval_score`（保持向后兼容）。
 新增可选字段 `retrieval_rank`、`rerank_score`、`reranker_applied`。
 
+## 请求级回退可见性
+
+`/search` 与 `/ask` 的顶层响应都新增两个布尔字段：
+
+- **`reranker_applied`** — 本次请求成功使用了 Reranker 排序。
+- **`reranker_fallback`** — 本次请求原本尝试 Reranker，但调用失败并回退
+  vector-only 排序。
+
+两者都为 `false` 时，表示 Reranker 未启用（或当前没有 RetrievalService）。
+
+两者不会同时为 `true`。
+
+```json
+{
+  "query": "问题",
+  "reranker_applied": false,
+  "reranker_fallback": true,
+  "results": []
+}
+```
+
+`/ask` 在 `insufficient_context` 与 `answered` 两种状态下都会返回这两个字段。
+
+## health 中的模型名脱敏
+
+`/health` 返回的 `reranker_model` 会经过安全显示函数处理：
+
+- Hugging Face 风格模型 ID（如 `BAAI/bge-reranker-v2-m3`）原样显示。
+- 本地绝对路径（POSIX、Windows、UNC）、`file://` URI、`~` 开头路径统一
+  显示为 `<local-model>`，不会暴露用户名、盘符、缓存目录或项目路径。
+
+内部模型加载仍使用原始配置值，只有公开响应使用安全显示名。
+
+## `config_invalid` 的 enabled 语义
+
+| 状态 | `reranker_enabled` | `reranker_ready` | 说明 |
+| --- | --- | --- | --- |
+| `disabled` | false | false | 正常禁用 |
+| `ready` | true | true | 启用且加载成功 |
+| `load_failed` | true | false | 启用、配置有效、加载失败 |
+| `config_invalid` | 视情况 | false | 配置非法 |
+
+`RAG_RERANKER_ENABLED` 本身无法解析（如 `maybe`）时，系统不能确认用户请求
+启用，因此公开字段保持 `reranker_enabled=false`、`reranker_status=config_invalid`。
+请求启用但模型名为空或候选数非法时，`reranker_enabled=true`、
+`reranker_status=config_invalid`。
+
+## 未变案例（unchanged）
+
+每个可回答问题必须且只能属于 `improved` / `regressed` / `unchanged` 之一。
+**两个分支都未命中**（vector 与 reranked 均 miss）的题目归入 `unchanged`。
+不可回答题目不进入任何检索排名变化集合。`rank_change` 只在两分支都有
+相关排名时计算；任一边 miss 时保持 `None`，不使用虚构排名。
+
 ## 为什么本 PR 不用 rerank_score 做拒答
 
 当前拒答阈值 `0.35`（或校准后的 `0.49`）来自 Embedding 分数分布。
@@ -93,6 +147,34 @@ CrossEncoder 模型以 `local_files_only=True` 方式加载：
 - Reranker 模型必须使用中文或多语言 CrossEncoder 模型。
 - 真实 baseline 必须记录完整模型名称，推荐同时记录 model revision。
 - 没有合适的本地模型时，指标保持 `N/A`，**不得**用 FakeReranker 结果冒充真实效果。
+
+## 只有真实 CrossEncoder 才能产生启用建议
+
+A/B 评估记录显式的运行来源（`reranker_backend` / `real_model_run`）：
+
+- 只有默认 CLI factory 成功构造真实 `CrossEncoderReranker` 时，
+  `backend=cross_encoder`、`real_model_run=true`。
+- 测试注入的 `FakeReranker`：`backend=fake`、`real_model_run=false`。
+- 其他自定义 factory：`backend=custom`、`real_model_run=false`。
+
+启用建议的检查顺序：**真实模型身份 → 回退 → 数据完整性 → 指标门槛 →
+决策一致性**。FakeReranker 或任何 `real_model_run=false` 的运行，即使指标
+看起来很好，也永远不会产生生产启用建议；理由为「本次运行未使用真实
+CrossEncoder，不能建议生产启用」。
+
+## 决策一致性与独立分数
+
+评估对每道题**分别独立计算**两个分支的最高向量检索分数：
+
+- `candidate_max_retrieval_score` — 完整候选池最高向量分数。
+- `vector_max_retrieval_score` — vector 分支视角的最高向量分数。
+- `reranked_max_retrieval_score` — reranked 完整候选列表（截断前）的
+  最高向量分数。
+
+两者都必须基于完整候选池，且在 reranked Top-K 截断前计算。`reranked_max`
+仍然是 retrieval score，不使用 rerank score。若重排过程丢失候选、修改
+retrieval score 或使用错误集合，两分支分数发散，决策一致性检查会失败并
+阻止启用建议——该检查是真实断言，不是「设计上应一致」的假检查。
 
 ## 如何运行 A/B 评估
 
