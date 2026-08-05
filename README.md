@@ -34,9 +34,11 @@
 - 上传文件使用 UUID 存储名，运行时数据目录不进入 Git
 - 支持上传大小限制 `MAX_UPLOAD_BYTES`，默认 10 MB
 - 通过 Vue 3 页面提供“知识库管理”模式，支持上传、列表和删除文档
+- 前端侧栏提供可用的“知识问答”“知识资料”“学习说明”导航，学习说明覆盖资料准备、提问、来源核对和格式边界
 - 提供离线检索与拒答评估基准：受控语料、60 题标注数据集和可复现的评估脚本
 - 通过 `python -m scripts.evaluate_rag` 输出 Hit@K、Recall@K、MRR 与回答/拒答混淆矩阵
 - 在 calibration split 上扫描相似度阈值并给出确定性的推荐值，不自动改写生产配置
+- 提供 FastAPI、Vue 构建、Nginx 反向代理、具名卷和健康检查组成的 Docker Compose 一键启动方案
 
 ## 当前没有实现
 
@@ -85,6 +87,9 @@ course-rag/
 │   ├── src/composables/      # 三种模式的独立状态管理
 │   ├── src/components/       # 检索、答案、文档管理与状态组件
 │   └── README.md             # 前端运行与学习说明
+├── docs/docker.md            # Docker Compose 使用、持久化测试与排障
+├── Dockerfile                # FastAPI CPU 运行镜像
+├── compose.yaml              # 本地完整应用编排和具名卷
 ├── requirements.txt          # Python 依赖
 └── README.md                 # 学习说明
 ```
@@ -272,6 +277,18 @@ $env:VITE_USE_MOCK_ASK="true"
 $env:VITE_USE_MOCK_DOCUMENTS="true"
 npm.cmd run dev
 ```
+
+## 使用 Docker Compose
+
+在仓库根目录可以一键构建并启动 FastAPI、编译后的 Vue 前端和 Nginx：
+
+```powershell
+docker compose up --build -d
+```
+
+默认访问 `http://127.0.0.1:8080`，FastAPI 继续通过 `/api/*` 访问。上传文件与文档元数据保存在 `course-rag-runtime` 具名卷，Hugging Face 模型缓存在 `course-rag-huggingface-cache` 具名卷。
+
+完整配置、健康检查、停止/重启、数据卷说明和自动化重建持久化测试见 [Docker Compose 使用指南](docs/docker.md)。
 
 ## 运行测试
 

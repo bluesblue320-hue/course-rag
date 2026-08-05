@@ -12,6 +12,7 @@ import RetrievalExplanation from "./components/RetrievalExplanation.vue"
 import SearchForm from "./components/SearchForm.vue"
 import SearchResults from "./components/SearchResults.vue"
 import SearchStatus from "./components/SearchStatus.vue"
+import StudyGuide from "./components/StudyGuide.vue"
 import { useKnowledgeAsk } from "./composables/useKnowledgeAsk"
 import { useKnowledgeSearch } from "./composables/useKnowledgeSearch"
 import { DEFAULT_INDEX_METADATA } from "./mocks/searchResponses"
@@ -61,6 +62,14 @@ const pageCopy = computed(() => {
       description: "上传、查看和删除课程资料，内容会立即参与检索与问答。",
     }
   }
+  if (mode.value === "guide") {
+    return {
+      eyebrow: "LEARNING GUIDE",
+      title: "学习说明",
+      description: "了解如何整理资料、提出问题并判断回答是否可靠。",
+    }
+  }
+
   return {
     eyebrow: "SEMANTIC RETRIEVAL",
     title: "课程知识检索",
@@ -94,13 +103,15 @@ async function submitQuestion(question: string): Promise<void> {
     await ask(question)
     return
   }
-  await search(question)
+  if (mode.value === "search") {
+    await search(question)
+  }
 }
 </script>
 
 <template>
   <div class="app-shell">
-    <AppSidebar />
+    <AppSidebar v-model="mode" :disabled="isBusy" />
 
     <main>
       <header class="page-header">
@@ -109,9 +120,9 @@ async function submitQuestion(question: string): Promise<void> {
         <p>{{ pageCopy.description }}</p>
       </header>
 
-      <QueryModeSwitch v-model="mode" :disabled="isBusy" />
+      <QueryModeSwitch v-if="mode !== 'guide'" v-model="mode" :disabled="isBusy" />
       <SearchForm
-        v-show="mode !== 'documents'"
+        v-show="mode === 'ask' || mode === 'search'"
         :mode="mode"
         :loading="isBusy"
         @submit="submitQuestion"
@@ -131,7 +142,8 @@ async function submitQuestion(question: string): Promise<void> {
         <SearchStatus :state="searchState" @retry="retrySearch" />
         <SearchResults :state="searchState" />
       </template>
-      <KnowledgeBasePanel v-else />
+      <KnowledgeBasePanel v-else-if="mode === 'documents'" />
+      <StudyGuide v-else />
     </main>
 
     <aside class="context-panel" aria-label="索引与检索说明">

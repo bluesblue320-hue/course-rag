@@ -1,4 +1,30 @@
-<script setup lang="ts"></script>
+<script setup lang="ts">
+import type { QueryMode } from "../types/queryMode"
+
+const props = withDefaults(
+  defineProps<{
+    modelValue: QueryMode
+    disabled?: boolean
+  }>(),
+  {
+    disabled: false,
+  },
+)
+
+const emit = defineEmits<{
+  "update:modelValue": [mode: QueryMode]
+}>()
+
+function selectMode(mode: QueryMode): void {
+  if (!props.disabled && mode !== props.modelValue) {
+    emit("update:modelValue", mode)
+  }
+}
+
+function isQuestionAreaActive(): boolean {
+  return props.modelValue === "ask" || props.modelValue === "search"
+}
+</script>
 
 <template>
   <aside class="sidebar">
@@ -12,9 +38,36 @@
     </div>
 
     <nav aria-label="主导航">
-      <span class="nav-item active" aria-current="page">知识问答</span>
-      <span class="nav-item" aria-disabled="true">知识资料</span>
-      <span class="nav-item" aria-disabled="true">学习说明</span>
+      <button
+        type="button"
+        class="nav-item"
+        :class="{ active: isQuestionAreaActive() }"
+        :aria-current="isQuestionAreaActive() ? 'page' : undefined"
+        :disabled="disabled"
+        @click="selectMode('ask')"
+      >
+        知识问答
+      </button>
+      <button
+        type="button"
+        class="nav-item"
+        :class="{ active: modelValue === 'documents' }"
+        :aria-current="modelValue === 'documents' ? 'page' : undefined"
+        :disabled="disabled"
+        @click="selectMode('documents')"
+      >
+        知识资料
+      </button>
+      <button
+        type="button"
+        class="nav-item"
+        :class="{ active: modelValue === 'guide' }"
+        :aria-current="modelValue === 'guide' ? 'page' : undefined"
+        :disabled="disabled"
+        @click="selectMode('guide')"
+      >
+        学习说明
+      </button>
     </nav>
 
     <p class="ready"><span aria-hidden="true" />本地知识库 · 已就绪</p>
@@ -55,10 +108,15 @@ nav {
 }
 
 .nav-item {
+  width: 100%;
   padding: 13px 15px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--color-muted);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
 }
 
 .nav-item.active {
@@ -68,8 +126,9 @@ nav {
   font-weight: 700;
 }
 
-.nav-item[aria-disabled="true"] {
-  opacity: 0.72;
+.nav-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .ready {
