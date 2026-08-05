@@ -41,7 +41,7 @@ from src.evaluation.reranking_runner import (
 )
 from src.evaluation.reranking_models import RerankerRunIdentity
 from src.evaluation.runner import EmbeddingProtocol
-from src.exceptions import RagError
+from src.exceptions import EvaluationError, RagError
 from src.rag_service import DEFAULT_MIN_RELEVANCE_SCORE
 from src.reranker import (
     DEFAULT_CANDIDATE_TOP_K,
@@ -58,6 +58,16 @@ EXIT_OK = 0
 EXIT_INVALID_INPUT = 2
 EXIT_EMBEDDING_UNAVAILABLE = 3
 EXIT_RERANKER_UNAVAILABLE = 4
+
+# Fixed public messages: model-loading errors never print the underlying
+# exception text, local paths, usernames, cache directories, or stack traces.
+EMBEDDING_LOAD_PUBLIC_ERROR = (
+    "无法加载 Embedding 模型；请确认模型已提前缓存到本地，且模型配置有效"
+)
+RERANKER_LOAD_PUBLIC_ERROR = (
+    "无法加载 Reranker 模型；请确认模型已提前缓存到本地，且模型名称或路径有效"
+)
+EVALUATION_RUN_PUBLIC_ERROR = "评估执行失败；请检查评估输入和配置"
 
 EmbeddingFactory = Callable[[str | None], tuple[EmbeddingProtocol, str]]
 RerankerFactory = Callable[[str], object]
@@ -307,24 +317,19 @@ def main(
         print(f"评估输入无效: {exc}", file=sys.stderr)
         return EXIT_INVALID_INPUT
 
-    # Load embedding model
+    # Load embedding model.  The failure message is fixed and public: the
+    # underlying exception may contain local paths and must never reach stderr.
     try:
         embedding_service, embedding_model = emb_factory(args.embedding_model)
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"无法加载 Embedding 模型: {exc}",
-            file=sys.stderr,
-        )
+    except Exception:  # noqa: BLE001
+        print(EMBEDDING_LOAD_PUBLIC_ERROR, file=sys.stderr)
         return EXIT_EMBEDDING_UNAVAILABLE
 
-    # Load reranker model
+    # Load reranker model.  Same rule: fixed public message only.
     try:
         reranker = rnk_factory(args.reranker_model)
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"无法加载 Reranker 模型: {exc}",
-            file=sys.stderr,
-        )
+    except Exception:  # noqa: BLE001
+        print(RERANKER_LOAD_PUBLIC_ERROR, file=sys.stderr)
         return EXIT_RERANKER_UNAVAILABLE
 
     reranker_identity = _build_run_identity(
@@ -333,7 +338,9 @@ def main(
         real_cross_encoder=use_default_reranker_factory,
     )
 
-    # Run evaluation
+    # Run evaluation.  Controlled input-validation errors (EvaluationError and
+    # its subclasses) carry curated public messages and may be shown; anything
+    # else gets a fixed generic message so no path or third-party text leaks.
     try:
         run = run_reranking_evaluation(
             cases=cases,
@@ -351,8 +358,11 @@ def main(
             include_latency=args.include_latency,
             reranker_identity=reranker_identity,
         )
-    except (RagError, ValueError) as exc:
+    except EvaluationError as exc:
         print(f"评估执行失败: {exc}", file=sys.stderr)
+        return EXIT_INVALID_INPUT
+    except Exception:
+        print(EVALUATION_RUN_PUBLIC_ERROR, file=sys.stderr)
         return EXIT_INVALID_INPUT
 
     write_reranking_reports(run, output_dir)

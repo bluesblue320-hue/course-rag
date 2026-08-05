@@ -8,9 +8,13 @@ from pathlib import Path
 import pytest
 
 from scripts.evaluate_reranker import (
+    EMBEDDING_LOAD_PUBLIC_ERROR,
+    EVALUATION_RUN_PUBLIC_ERROR,
+    EXIT_EMBEDDING_UNAVAILABLE,
     EXIT_INVALID_INPUT,
     EXIT_OK,
     EXIT_RERANKER_UNAVAILABLE,
+    RERANKER_LOAD_PUBLIC_ERROR,
     build_parser,
     main,
 )
@@ -349,7 +353,7 @@ class TestErrorHandling:
         assert exit_code == EXIT_INVALID_INPUT
 
     def test_no_exception_traceback_in_output(self, tmp_path: Path, capsys) -> None:
-        """Error output must not leak internal exception traces."""
+        """Error output must not leak internal exception traces or paths."""
         def failing_reranker_factory(model_name):
             raise RuntimeError("internal secret path C:\\secret\\cache")
 
@@ -369,3 +373,139 @@ class TestErrorHandling:
         assert exit_code == EXIT_RERANKER_UNAVAILABLE
         captured = capsys.readouterr()
         assert "Traceback" not in captured.err
+        assert "C:" not in captured.err
+        assert "secret" not in captured.err
+        assert RERANKER_LOAD_PUBLIC_ERROR in captured.err
+
+    def test_reranker_error_does_not_leak_windows_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        def failing_reranker_factory(model_name):
+            raise RuntimeError(
+                r"model missing at C:\Users\secret\.cache\huggingface\models\foo"
+            )
+
+        exit_code = main(
+            [
+                "--manifest", DEFAULT_MANIFEST,
+                "--dataset", DEFAULT_DATASET,
+                "--output-dir", str(tmp_path / "output"),
+                "--candidate-top-k", "15",
+                "--final-top-k", "5",
+                "--reranker-model", "missing",
+            ],
+            embedding_factory=fake_embedding_factory,
+            reranker_factory=failing_reranker_factory,
+        )
+
+        assert exit_code == EXIT_RERANKER_UNAVAILABLE
+        captured = capsys.readouterr()
+        err = captured.err
+        assert "C:" not in err
+        assert "Users" not in err
+        assert "secret" not in err
+        assert ".cache" not in err
+        assert "huggingface" not in err
+        assert "Traceback" not in err
+        assert "model missing at" not in err
+        assert RERANKER_LOAD_PUBLIC_ERROR in err
+
+    def test_reranker_error_does_not_leak_posix_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        def failing_reranker_factory(model_name):
+            raise RuntimeError("/home/private-user/.cache/models/reranker not found")
+
+        exit_code = main(
+            [
+                "--manifest", DEFAULT_MANIFEST,
+                "--dataset", DEFAULT_DATASET,
+                "--output-dir", str(tmp_path / "output"),
+                "--candidate-top-k", "15",
+                "--final-top-k", "5",
+                "--reranker-model", "missing",
+            ],
+            embedding_factory=fake_embedding_factory,
+            reranker_factory=failing_reranker_factory,
+        )
+
+        assert exit_code == EXIT_RERANKER_UNAVAILABLE
+        captured = capsys.readouterr()
+        err = captured.err
+        assert "/home" not in err
+        assert "private-user" not in err
+        assert ".cache" not in err
+        assert "not found" not in err
+        assert RERANKER_LOAD_PUBLIC_ERROR in err
+
+    def test_embedding_error_does_not_leak_path(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        def failing_embedding_factory(model_name):
+            raise RuntimeError(r"C:\Users\private\.cache\embedding")
+
+        exit_code = main(
+            [
+                "--manifest", DEFAULT_MANIFEST,
+                "--dataset", DEFAULT_DATASET,
+                "--output-dir", str(tmp_path / "output"),
+                "--candidate-top-k", "15",
+                "--final-top-k", "5",
+                "--reranker-model", "fake-reranker",
+            ],
+            embedding_factory=failing_embedding_factory,
+            reranker_factory=fake_reranker_factory,
+        )
+
+        assert exit_code == EXIT_EMBEDDING_UNAVAILABLE
+        captured = capsys.readouterr()
+        err = captured.err
+        assert "C:" not in err
+        assert "Users" not in err
+        assert "private" not in err
+        assert ".cache" not in err
+        assert "Traceback" not in err
+        assert EMBEDDING_LOAD_PUBLIC_ERROR in err
+
+    def test_evaluation_error_does_not_leak_unknown_exception(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        # An unexpected third-party exception during the run must be replaced
+        # by a fixed public message, never echoed verbatim.
+        def exploding_reranker_factory(model_name):
+            return FakeReranker()
+
+        original_runner = None
+        import scripts.evaluate_reranker as cli_module
+
+        def exploding_run(**kwargs):
+            raise RuntimeError(
+                r"internal failure at /home/private-user/.cache/models"
+            )
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(cli_module, "run_reranking_evaluation", exploding_run)
+        try:
+            exit_code = main(
+                [
+                    "--manifest", DEFAULT_MANIFEST,
+                    "--dataset", DEFAULT_DATASET,
+                    "--output-dir", str(tmp_path / "output"),
+                    "--candidate-top-k", "15",
+                    "--final-top-k", "5",
+                    "--reranker-model", "fake-reranker",
+                ],
+                embedding_factory=fake_embedding_factory,
+                reranker_factory=exploding_reranker_factory,
+            )
+        finally:
+            monkeypatch.undo()
+
+        assert exit_code == EXIT_INVALID_INPUT
+        captured = capsys.readouterr()
+        err = captured.err
+        assert "/home" not in err
+        assert "private-user" not in err
+        assert ".cache" not in err
+        assert "internal failure" not in err
+        assert EVALUATION_RUN_PUBLIC_ERROR in err

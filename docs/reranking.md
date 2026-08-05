@@ -162,6 +162,12 @@ A/B 评估记录显式的运行来源（`reranker_backend` / `real_model_run`）
 看起来很好，也永远不会产生生产启用建议；理由为「本次运行未使用真实
 CrossEncoder，不能建议生产启用」。
 
+**身份必须与实际实例绑定**：CLI 负责声明身份，Runner 负责验证。只有实际
+实例是 `CrossEncoderReranker` 时，`backend=cross_encoder` 且
+`real_model_run=true` 的身份才被接受；FakeReranker、自定义测试替身或
+Mock 伪造真实身份（矛盾组合）会在评估开始阶段抛出
+`EvaluationError`，不会静默继续。
+
 ## 决策一致性与独立分数
 
 评估对每道题**分别独立计算**两个分支的最高向量检索分数：

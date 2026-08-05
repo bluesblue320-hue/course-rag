@@ -51,7 +51,12 @@ from src.evaluation.runner import EmbeddingProtocol
 from src.exceptions import EvaluationError
 from src.knowledge_index import KnowledgeIndex
 from src.rag_service import has_sufficient_context
-from src.reranker import RerankInput, RerankerProtocol, safe_rerank
+from src.reranker import (
+    CrossEncoderReranker,
+    RerankInput,
+    RerankerProtocol,
+    safe_rerank,
+)
 from src.retrieval_service import _stable_sort_key
 
 
@@ -342,6 +347,49 @@ def _check_decision_invariance(
     return (len(inconsistent) == 0), tuple(inconsistent)
 
 
+def validate_reranker_identity(
+    reranker: RerankerProtocol,
+    identity: RerankerRunIdentity | None,
+    *,
+    fallback_model_name: str,
+) -> RerankerRunIdentity:
+    """Validate the declared identity against the actual reranker instance.
+
+    Only an actual ``CrossEncoderReranker`` instance may claim
+    ``backend="cross_encoder"`` with ``real_model_run=True``.  A forged
+    identity — a fake or custom reranker pretending to be a real CrossEncoder,
+    or a real CrossEncoder carrying an invalid backend — raises
+    ``EvaluationError`` because identity inconsistency is a data-integrity
+    error and must not be silently downgraded.
+
+    When ``identity`` is ``None``, a safe identity with ``real_model_run=False``
+    is returned so an unverified run can never justify a production enable
+    recommendation.  The CLI declares the identity; this runner verifies it.
+    """
+    if identity is None:
+        return RerankerRunIdentity(
+            backend="custom",
+            real_model_run=False,
+            model_name=fallback_model_name,
+        )
+
+    is_real_cross_encoder = isinstance(reranker, CrossEncoderReranker)
+
+    if identity.real_model_run:
+        if identity.backend != "cross_encoder":
+            raise EvaluationError("Reranker 真实模型身份无效")
+        if not is_real_cross_encoder:
+            raise EvaluationError("Reranker 身份与实际实例不一致")
+
+    if identity.backend == "cross_encoder" and not is_real_cross_encoder:
+        raise EvaluationError("Reranker 身份与实际实例不一致")
+
+    if is_real_cross_encoder and identity.backend != "cross_encoder":
+        raise EvaluationError("CrossEncoder 实例的 backend 配置无效")
+
+    return identity
+
+
 def _evaluate_recommendation(
     vector_metrics: BranchMetrics,
     reranked_metrics: BranchMetrics,
@@ -477,7 +525,9 @@ def run_reranking_evaluation(
     ``reranker_identity`` records the actual reranker provenance.  When it is
     omitted (for example in tests that inject a substitute), a safe identity
     with ``real_model_run=False`` is assumed so no production enable
-    recommendation can ever be produced from an unverified run.
+    recommendation can ever be produced from an unverified run.  A forged
+    identity (e.g. a fake reranker claiming to be a real CrossEncoder) raises
+    ``EvaluationError`` instead of running.
     """
     if not cases:
         raise EvaluationError("评估数据集不能为空")
@@ -491,14 +541,14 @@ def run_reranking_evaluation(
     if final_top_k < 5:
         raise EvaluationError("final_top_k 必须大于等于 5")
 
-    # Safe default provenance: without explicit identity we cannot claim a
-    # real CrossEncoder ran, so the run can never justify production enablement.
-    if reranker_identity is None:
-        reranker_identity = RerankerRunIdentity(
-            backend="custom",
-            real_model_run=False,
-            model_name=reranker_model,
-        )
+    # Validate the declared identity against the actual reranker instance.
+    # Without explicit identity we cannot claim a real CrossEncoder ran, so the
+    # run can never justify production enablement; a forged identity raises.
+    reranker_identity = validate_reranker_identity(
+        reranker,
+        reranker_identity,
+        fallback_model_name=reranker_model,
+    )
 
     # Build the index once (document embeddings computed once)
     document_embeddings = embedding_service.encode_documents(

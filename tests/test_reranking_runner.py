@@ -25,8 +25,10 @@ from src.evaluation.reranking_runner import (
     _evaluate_recommendation,
     check_decision_invariance,
     run_reranking_evaluation,
+    validate_reranker_identity,
 )
-from src.reranker import FakeReranker
+from src.exceptions import EvaluationError
+from src.reranker import CrossEncoderReranker, FakeReranker
 from tests.evaluation_helpers import (
     FakeEmbeddingService,
     make_case,
@@ -878,6 +880,115 @@ class TestRealModelGating:
 
 
 # ---------------------------------------------------------------------------
+# Fix 1 (round 3): identity must be bound to the actual instance
+# ---------------------------------------------------------------------------
+
+
+class TestRunnerIdentityValidation:
+    def test_fake_reranker_forging_real_identity_raises(self) -> None:
+        forged = RerankerRunIdentity(
+            backend="cross_encoder",
+            real_model_run=True,
+            model_name="BAAI/some-reranker",
+        )
+        with pytest.raises(EvaluationError, match="身份与实际实例不一致"):
+            validate_reranker_identity(FakeReranker(), forged, fallback_model_name="m")
+
+    def test_fake_reranker_forging_real_identity_fails_full_runner(self) -> None:
+        forged = RerankerRunIdentity(
+            backend="cross_encoder",
+            real_model_run=True,
+            model_name="BAAI/some-reranker",
+        )
+        with pytest.raises(EvaluationError, match="身份与实际实例不一致"):
+            run_reranking_evaluation(
+                cases=make_test_cases(),
+                corpus_chunks=make_corpus_chunks(),
+                embedding_service=FakeEmbeddingService(),
+                embedding_model="fake",
+                reranker=FakeReranker(),
+                reranker_model="fake-reranker",
+                manifest_path="m",
+                dataset_path="d",
+                candidate_top_k=15,
+                final_top_k=5,
+                comparison_threshold=0.35,
+                recommended_threshold=0.49,
+                reranker_identity=forged,
+            )
+
+    def test_fake_reranker_forging_backend_raises(self) -> None:
+        # backend=cross_encoder but real_model_run=false: still a contradiction.
+        forged = RerankerRunIdentity(
+            backend="cross_encoder",
+            real_model_run=False,
+            model_name="some-model",
+        )
+        with pytest.raises(EvaluationError, match="身份与实际实例不一致"):
+            validate_reranker_identity(FakeReranker(), forged, fallback_model_name="m")
+
+    def test_custom_backend_claiming_real_run_raises(self) -> None:
+        forged = RerankerRunIdentity(
+            backend="custom",
+            real_model_run=True,
+            model_name="some-model",
+        )
+        with pytest.raises(EvaluationError, match="真实模型身份无效"):
+            validate_reranker_identity(FakeReranker(), forged, fallback_model_name="m")
+
+    def test_real_cross_encoder_with_correct_identity_passes(self) -> None:
+        # Build an instance without calling __init__ (no model load) purely
+        # for the type check.
+        instance = object.__new__(CrossEncoderReranker)
+        identity = RerankerRunIdentity(
+            backend="cross_encoder",
+            real_model_run=True,
+            model_name="BAAI/bge-reranker-v2-m3",
+        )
+        result = validate_reranker_identity(
+            instance, identity, fallback_model_name="m"
+        )
+        assert result is identity
+
+    def test_real_cross_encoder_with_invalid_backend_raises(self) -> None:
+        instance = object.__new__(CrossEncoderReranker)
+        identity = RerankerRunIdentity(
+            backend="fake",
+            real_model_run=False,
+            model_name="fake-reranker",
+        )
+        with pytest.raises(EvaluationError, match="backend 配置无效"):
+            validate_reranker_identity(instance, identity, fallback_model_name="m")
+
+    def test_none_identity_defaults_to_safe_custom(self) -> None:
+        result = validate_reranker_identity(
+            FakeReranker(), None, fallback_model_name="fake-reranker"
+        )
+        assert result.backend == "custom"
+        assert result.real_model_run is False
+        assert result.model_name == "fake-reranker"
+
+    def test_runner_without_identity_stays_safe(self) -> None:
+        run = run_reranking_evaluation(
+            cases=make_test_cases(),
+            corpus_chunks=make_corpus_chunks(),
+            embedding_service=FakeEmbeddingService(),
+            embedding_model="fake",
+            reranker=FakeReranker(),
+            reranker_model="fake-reranker",
+            manifest_path="m",
+            dataset_path="d",
+            candidate_top_k=15,
+            final_top_k=5,
+            comparison_threshold=0.35,
+            recommended_threshold=0.49,
+        )
+        assert run.reranker_identity.real_model_run is False
+        assert run.reranker_identity.backend in ("custom", "fake")
+        assert run.recommend_enable is False
+
+
+# ---------------------------------------------------------------------------
 # Fix 1 (round 2): full-runner decision invariance genuinely fail-able
 # ---------------------------------------------------------------------------
 
@@ -1012,8 +1123,8 @@ class TestRunnerDecisionInvarianceNegative:
         assert "t-drift" in run.decision_invariance_inconsistent_case_ids
         assert run.recommend_enable is False
 
-    def test_runner_positive_still_passes_with_real_identity(self) -> None:
-        """Normal data flow keeps passing even with a real identity."""
+    def test_runner_positive_still_passes_with_fake_identity(self) -> None:
+        """Normal data flow keeps passing; no real identity is needed."""
         run = run_reranking_evaluation(
             cases=make_test_cases(),
             corpus_chunks=make_corpus_chunks(),
@@ -1027,10 +1138,12 @@ class TestRunnerDecisionInvarianceNegative:
             final_top_k=5,
             comparison_threshold=0.35,
             recommended_threshold=0.49,
-            reranker_identity=real_identity("fake-reranker"),
+            reranker_identity=fake_identity("fake-reranker"),
         )
         assert run.decision_invariance_passed is True
         assert run.decision_invariance_inconsistent_case_ids == ()
+        assert run.reranker_identity.real_model_run is False
+        assert run.recommend_enable is False
 
 
 # ---------------------------------------------------------------------------
