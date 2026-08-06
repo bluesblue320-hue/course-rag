@@ -550,6 +550,10 @@ def test_reconcile_delete_failure_does_not_break_valid_startup(
         "..\\..\\escape.txt",
         "C:/absolute/escape.txt",
         "/absolute/escape.txt",
+        "0123456789abcdef0123456789abcdef",
+        "0123456789abcdef0123456789abcdef.exe",
+        "0123456789abcdef0123456789abcdef.txt/pwn",
+        "0x23456789abcdef0123456789abcdef.txt",
     ],
 )
 def test_resolve_stored_path_rejects_dangerous_names(
