@@ -69,12 +69,22 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.13.0"
 
-      - name: Assert CPU-only PyTorch runtime
-        run: |
-          python -c "import torch; print('torch', torch.__version__); assert torch.__version__.endswith('+cpu'), 'expected CPU-only torch build'"
-
       - name: Install backend dependencies
         run: python -m pip install -r requirements.txt
+
+      # Runs after all backend dependencies (including NumPy) are installed:
+      # importing PyTorch before NumPy exists triggers a transient NumPy
+      # initialization warning, and the +cpu suffix / CUDA-absence checks are
+      # only meaningful once the full runtime is in place.
+      - name: Assert CPU-only PyTorch runtime
+        run: |
+          python - <<'PY'
+          import torch
+          assert torch.__version__.endswith("+cpu"), f"expected CPU-only torch build, got {torch.__version__}"
+          assert torch.version.cuda is None, f"CUDA-enabled torch build, got cuda={torch.version.cuda}"
+          assert torch.cuda.is_available() is False, "torch.cuda.is_available() must be False on CPU-only builds"
+          print(f"CPU-only PyTorch verified: {torch.__version__} (cuda={torch.version.cuda}, available={torch.cuda.is_available()})")
+          PY
 
       - name: Python syntax check
         run: python -m compileall -q src scripts tests
