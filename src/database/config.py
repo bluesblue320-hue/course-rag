@@ -1,12 +1,12 @@
 """Resolve vector store backend and PostgreSQL connection configuration.
 
 Configuration is resolved lazily by explicit function calls.  Importing this
-module never reads the environment, never connects to a database, and never
-prints secrets.
+module never connects to a database and never prints secrets.  ``memory``
+mode completely ignores ``DATABASE_URL``: it is neither read, validated, nor
+connected to.
 """
 
 import os
-import re
 from typing import Literal
 
 from src.exceptions import DatabaseConfigurationError
@@ -38,12 +38,16 @@ def resolve_vector_store_backend(
 ) -> VectorStoreBackend:
     """Return the normalized vector store backend.
 
-    Missing or blank values default to ``memory``.  The backend value is
-    case-insensitive and leading/trailing whitespace is ignored.  Any value
-    other than ``memory`` or ``pgvector`` raises
-    :class:`DatabaseConfigurationError`.
+    When ``raw_value`` is not given the ``VECTOR_STORE_BACKEND`` environment
+    variable is read instead.  Missing or blank values default to
+    ``memory``.  The backend value is case-insensitive and leading/trailing
+    whitespace is ignored.  Any value other than ``memory`` or ``pgvector``
+    raises :class:`DatabaseConfigurationError`.
     """
-    value = (raw_value or "").strip().lower()
+    value = raw_value if raw_value is not None else os.getenv(
+        VECTOR_STORE_BACKEND_ENV
+    )
+    value = (value or "").strip().lower()
     if value in ("", "memory"):
         return "memory"
     if value == "pgvector":
@@ -86,11 +90,13 @@ def resolve_database_url_for_backend(
 ) -> str | None:
     """Resolve the database URL that a backend requires.
 
-    The ``memory`` backend never requires a connection string.  The
-    ``pgvector`` backend requires a valid ``postgresql+psycopg://`` URL.
+    The ``memory`` backend completely ignores ``DATABASE_URL``: it never
+    reads the environment, never validates any value, and always returns
+    ``None``.  The ``pgvector`` backend requires a valid
+    ``postgresql+psycopg://`` URL.
     """
     if backend == "memory":
-        return resolve_database_url(raw_value, required=False)
+        return None
     return resolve_database_url(raw_value, required=True)
 
 

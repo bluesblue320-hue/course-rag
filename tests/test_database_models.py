@@ -4,6 +4,8 @@ These tests inspect the in-memory schema only; they never connect to a
 database.
 """
 
+from pathlib import Path
+
 from sqlalchemy import CheckConstraint, MetaData, UniqueConstraint, inspect
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -11,6 +13,7 @@ from src.database.base import DEFAULT_EMBEDDING_DIMENSION, Base
 from src.database.models import ChunkModel, DocumentModel
 
 _TABLE_NAMES = {"documents", "chunks"}
+_MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations" / "versions"
 
 
 def test_only_project_tables_are_registered() -> None:
@@ -135,3 +138,27 @@ def test_relationships_configured() -> None:
     assert document_chunks.passive_deletes is True
     chunk_document = inspect(ChunkModel).relationships["document"]
     assert chunk_document.passive_deletes is True
+
+
+def test_initial_migration_pins_embedding_dimension() -> None:
+    """The first migration must hardcode VECTOR(384), not follow a constant.
+
+    A committed migration is immutable history: if
+    DEFAULT_EMBEDDING_DIMENSION were ever edited, the first migration would
+    silently change what it created.  The dimension is therefore written out
+    explicitly in the migration file.
+    """
+    migration_file = _MIGRATIONS_DIR / "9ecde52cf1bd_create_pgvector_schema.py"
+    assert migration_file.is_file()
+    source = migration_file.read_text(encoding="utf-8")
+
+    assert "VECTOR(384)" in source
+    assert "DEFAULT_EMBEDDING_DIMENSION" not in source
+    assert "from src.database.base import" not in source
+
+
+def test_initial_migration_has_no_runtime_src_imports() -> None:
+    """Migrations must not depend on application runtime modules."""
+    migration_file = _MIGRATIONS_DIR / "9ecde52cf1bd_create_pgvector_schema.py"
+    source = migration_file.read_text(encoding="utf-8")
+    assert "from src." not in source

@@ -26,21 +26,18 @@ target_metadata = Base.metadata
 
 
 def _configured_database_url() -> str:
-    """Return the DATABASE_URL value required for any migration run.
-
-    Alembic's ConfigParser interprets ``%`` as an interpolation marker, so
-    escaped percent signs are unescaped for SQLAlchemy.
-    """
+    """Return the DATABASE_URL value required for any migration run."""
     database_url = resolve_database_url(required=True)
     assert database_url is not None  # required=True raises when missing
-    return database_url.replace("%", "%%")
+    return database_url
 
 
 def run_migrations_offline() -> None:
     """Render migration SQL to a script without connecting to a database."""
-    url = _configured_database_url()
+    # Offline mode passes the raw URL straight to SQLAlchemy; no ConfigParser
+    # interpolation happens on this path, so percent signs stay untouched.
     context.configure(
-        url=url,
+        url=_configured_database_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -53,10 +50,15 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Apply migrations against a live database connection."""
-    section = config.get_section(config.config_ini_section, {})
-    section["sqlalchemy.url"] = _configured_database_url()
+    # Alembic's ConfigParser treats ``%`` as an interpolation marker, so the
+    # URL is stored with doubled percent signs; engine_from_config reads it
+    # back through the parser, which restores the original ``%`` characters.
+    config.set_main_option(
+        "sqlalchemy.url",
+        _configured_database_url().replace("%", "%%"),
+    )
     connectable = engine_from_config(
-        section,
+        config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )

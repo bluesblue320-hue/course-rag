@@ -12,6 +12,12 @@ Downgrade drops the project tables but deliberately keeps the ``vector``
 extension: the extension may be shared by other schemas or managed by the
 database administrator.  For a full cleanup an administrator must explicitly
 run ``DROP EXTENSION vector``.
+
+The embedding column is permanently pinned to ``VECTOR(384)`` in this
+migration: 384 is the dimension of the default sentence-transformers model
+(paraphrase-multilingual-MiniLM-L12-v2).  A migration must never follow a
+runtime constant, so the dimension is written out explicitly and will not
+change if the application-level embedding dimension is ever edited.
 """
 from typing import Sequence, Union
 
@@ -21,13 +27,14 @@ from sqlalchemy.dialects import postgresql
 
 from pgvector.sqlalchemy import VECTOR
 
-from src.database.base import DEFAULT_EMBEDDING_DIMENSION
-
 # revision identifiers, used by Alembic.
 revision: str = "9ecde52cf1bd"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+#: Permanent dimension of the embeddings.column for this migration.
+EMBEDDING_DIMENSION = 384
 
 
 def upgrade() -> None:
@@ -103,7 +110,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             "embedding",
-            VECTOR(DEFAULT_EMBEDDING_DIMENSION),
+            VECTOR(EMBEDDING_DIMENSION),
             nullable=False,
         ),
         sa.Column(
