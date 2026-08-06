@@ -1,4 +1,11 @@
-"""Exercise the Docker stack, including volume persistence across recreation."""
+"""Exercise the Docker stack, including volume persistence across recreation.
+
+The smoke test deliberately isolates itself from the caller's environment:
+every ``docker compose`` invocation uses a generated env file holding only
+safe defaults plus a process environment stripped of ``LLM_*`` / ``RAG_*``
+variables.  A local root ``.env`` or exported variables therefore can never
+enable a real Reranker or carry real LLM credentials into the containers.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -19,15 +27,71 @@ from uuid import uuid4
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 
+#: Variables removed from the subprocess environment for every Compose call.
+#: They would either leak real credentials into containers or change the
+#: retrieval behavior this test is supposed to exercise in its default state.
+_SENSITIVE_ENV_PREFIXES = ("LLM_", "RAG_")
+_SENSITIVE_ENV_KEYS = frozenset({"APP_PORT", "MAX_UPLOAD_BYTES"})
+
+#: Safe values written into the isolated env file passed to Compose, so the
+#: project-root ``.env`` (if any) is ignored for interpolation.
+ISOLATED_ENV_FILE_CONTENT = """\
+APP_PORT=8080
+LLM_API_KEY=
+LLM_BASE_URL=
+LLM_MODEL=
+LLM_TIMEOUT_SECONDS=30
+MAX_UPLOAD_BYTES=10485760
+RAG_MIN_RELEVANCE_SCORE=0.35
+RAG_RERANKER_ENABLED=false
+RAG_RERANKER_MODEL=
+RAG_RERANKER_CANDIDATE_TOP_K=15
+"""
+
+#: Path of the isolated env file; created in main() and removed afterwards.
+_isolated_env_file: Path | None = None
+
+
+def _sanitized_environment() -> dict[str, str]:
+    """Return the process environment without sensitive LLM/RAG variables."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(_SENSITIVE_ENV_PREFIXES)
+        and key not in _SENSITIVE_ENV_KEYS
+    }
+
+
+def _write_isolated_env_file() -> Path:
+    """Create a temporary env file with safe defaults for Compose to use."""
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="course-rag-smoke-",
+        suffix=".env",
+        delete=False,
+    )
+    with handle:
+        handle.write(ISOLATED_ENV_FILE_CONTENT)
+    return Path(handle.name)
+
 
 def run_compose(*arguments: str, capture_output: bool = False) -> str:
-    """Run one Docker Compose command from the repository root."""
+    """Run one Docker Compose command from the repository root.
+
+    Every call uses the isolated env file and a sanitized environment, so a
+    local ``.env`` or exported variables cannot enable a real Reranker or
+    carry real LLM credentials into the containers.
+    """
+    if _isolated_env_file is None:
+        raise RuntimeError("isolated env file has not been created")
     completed = subprocess.run(
-        ["docker", "compose", *arguments],
+        ["docker", "compose", "--env-file", str(_isolated_env_file), *arguments],
         cwd=PROJECT_ROOT,
         check=True,
         text=True,
         capture_output=capture_output,
+        env=_sanitized_environment(),
     )
     return completed.stdout.strip() if capture_output else ""
 
@@ -147,55 +211,32 @@ def backend_python(script: str) -> str:
     )
 
 
-def load_env_defaults() -> dict[str, str]:
-    """Read ``KEY=VALUE`` entries from the root ``.env`` when present.
-
-    Keeps the smoke test standard-library only: Docker Compose resolves the
-    same file when interpolating ``${VAR:-default}`` in ``compose.yaml``.
-    """
-    values: dict[str, str] = {}
-    env_path = PROJECT_ROOT / ".env"
-    if not env_path.exists():
-        return values
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        if key:
-            values[key] = value.strip().strip('"').strip("'")
-    return values
-
-
 def assert_default_rag_settings() -> dict[str, str]:
-    """Verify Compose passes the default RAG settings to the backend.
+    """Verify Compose passes the safe default settings to the backend.
 
-    Compose uses ``${RAG_RERANKER_ENABLED:-false}``,
-    ``${RAG_RERANKER_CANDIDATE_TOP_K:-15}`` and
-    ``${RAG_MIN_RELEVANCE_SCORE:-0.35}`` with defaults that match the
-    application's built-in defaults.  With no override in the root ``.env``
-    the container values must equal those defaults; an explicit ``.env``
-    value takes precedence and must be passed through unchanged.
+    The smoke test always launches Compose with the isolated env file and a
+    sanitized process environment, so the container must receive the
+    application's built-in defaults regardless of any root ``.env`` or
+    exported variables: reranker disabled, candidate pool 15, relevance
+    threshold 0.35, and empty LLM credentials.
     """
-    configured = load_env_defaults()
     expected = {
-        "RAG_RERANKER_ENABLED": configured.get(
-            "RAG_RERANKER_ENABLED", "false"
-        ).lower(),
-        "RAG_RERANKER_CANDIDATE_TOP_K": configured.get(
-            "RAG_RERANKER_CANDIDATE_TOP_K", "15"
-        ),
-        "RAG_MIN_RELEVANCE_SCORE": configured.get(
-            "RAG_MIN_RELEVANCE_SCORE", "0.35"
-        ),
+        "RAG_RERANKER_ENABLED": "false",
+        "RAG_RERANKER_CANDIDATE_TOP_K": "15",
+        "RAG_MIN_RELEVANCE_SCORE": "0.35",
+        "LLM_API_KEY": "",
+        "LLM_BASE_URL": "",
+        "LLM_MODEL": "",
     }
     raw = backend_python(
         "import json, os; "
         "print(json.dumps({"
         "'RAG_RERANKER_ENABLED': os.environ.get('RAG_RERANKER_ENABLED'), "
         "'RAG_RERANKER_CANDIDATE_TOP_K': os.environ.get('RAG_RERANKER_CANDIDATE_TOP_K'), "
-        "'RAG_MIN_RELEVANCE_SCORE': os.environ.get('RAG_MIN_RELEVANCE_SCORE')"
+        "'RAG_MIN_RELEVANCE_SCORE': os.environ.get('RAG_MIN_RELEVANCE_SCORE'), "
+        "'LLM_API_KEY': os.environ.get('LLM_API_KEY'), "
+        "'LLM_BASE_URL': os.environ.get('LLM_BASE_URL'), "
+        "'LLM_MODEL': os.environ.get('LLM_MODEL')"
         "}))"
     )
     settings = json.loads(raw)
@@ -205,7 +246,8 @@ def assert_default_rag_settings() -> dict[str, str]:
     }
     if normalized != expected:
         raise AssertionError(
-            f"RAG settings drifted from Compose config: {settings} != {expected}"
+            f"RAG/LLM settings drifted from the safe defaults: "
+            f"{settings} != {expected}"
         )
     return settings
 
@@ -213,10 +255,11 @@ def assert_default_rag_settings() -> dict[str, str]:
 def assert_compose_interpolation() -> None:
     """Verify ``${VAR:-default}`` interpolation expands explicit overrides.
 
-    This only runs ``docker compose config`` with temporary environment
-    variables; it never starts containers, so no real Reranker is loaded.
-    The overrides are injected into a child process and cannot leak into the
-    caller's environment.
+    This only runs ``docker compose config`` with temporary override
+    variables on top of the sanitized environment; it never starts
+    containers, so no real Reranker is loaded.  The overrides are injected
+    into a child process and cannot leak into the caller's environment, and
+    any caller-provided LLM/RAG variables are stripped first.
     """
     overrides = {
         "RAG_RERANKER_ENABLED": "true",
@@ -224,9 +267,9 @@ def assert_compose_interpolation() -> None:
         "RAG_RERANKER_CANDIDATE_TOP_K": "12",
         "RAG_MIN_RELEVANCE_SCORE": "0.42",
     }
-    child_env = {**os.environ, **overrides}
+    child_env = {**_sanitized_environment(), **overrides}
     completed = subprocess.run(
-        ["docker", "compose", "config"],
+        ["docker", "compose", "--env-file", str(_isolated_env_file), "config"],
         cwd=PROJECT_ROOT,
         check=True,
         text=True,
@@ -354,10 +397,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    global _isolated_env_file
     args = parse_args()
     marker_token = hashlib.sha256(uuid4().bytes).hexdigest()
     marker_path = f"/cache/huggingface/.course-rag-test-{uuid4().hex}"
 
+    _isolated_env_file = _write_isolated_env_file()
+    try:
+        return _run(args, marker_token, marker_path)
+    finally:
+        if _isolated_env_file is not None:
+            _isolated_env_file.unlink(missing_ok=True)
+            _isolated_env_file = None
+
+
+def _run(args: argparse.Namespace, marker_token: str, marker_path: str) -> int:
     print("[1/7] Verifying Compose interpolation and starting the stack...")
     assert_compose_interpolation()
     up_arguments = ["up", "-d"]

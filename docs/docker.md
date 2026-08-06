@@ -77,7 +77,7 @@ RAG_RERANKER_CANDIDATE_TOP_K=15
 RAG_MIN_RELEVANCE_SCORE=0.35
 ```
 
-这些默认值不是永久固定的：用户可以通过本地 `.env` 或进程环境变量显式覆盖，Compose 会把覆盖后的值原样透传给后端。未配置时容器行为与直接运行 `uvicorn src.api:app` 完全一致（Reranker 关闭、相关性阈值 0.35）。`scripts/docker_smoke_test.py` 会校验容器实际收到的默认值与 Compose 配置一致，防止透传漂移；默认 Smoke Test 不启用 Reranker，Docker 验证流程也不会下载 Reranker 模型。首次启动后端仍可能下载默认 Embedding 模型。`MAX_UPLOAD_BYTES` 默认仍为 `10485760`。Nginx 的请求体上限略高于 10 MiB，用来容纳 multipart 头部；实际文件大小仍由 FastAPI 按 `MAX_UPLOAD_BYTES` 校验。
+这些默认值不是永久固定的：用户可以通过本地 `.env` 或进程环境变量显式覆盖，Compose 会把覆盖后的值原样透传给后端。未配置时容器行为与直接运行 `uvicorn src.api:app` 完全一致（Reranker 关闭、相关性阈值 0.35）。`scripts/docker_smoke_test.py` 在隔离环境下运行，校验容器实际收到的就是这些安全默认值；默认 Smoke Test 不启用 Reranker，Docker 验证流程也不会下载 Reranker 模型。首次启动后端仍可能下载默认 Embedding 模型。`MAX_UPLOAD_BYTES` 默认仍为 `10485760`。Nginx 的请求体上限略高于 10 MiB，用来容纳 multipart 头部；实际文件大小仍由 FastAPI 按 `MAX_UPLOAD_BYTES` 校验。
 
 `.env` 可能包含密钥，已被 Git 和 Docker 构建上下文排除。不要提交或分享 `docker compose config` 的完整输出，因为其中可能包含展开后的环境变量。
 
@@ -158,12 +158,14 @@ python scripts/docker_smoke_test.py
 
 1. 用临时环境变量执行 `docker compose config`，验证 Reranker/阈值等设置可以被显式覆盖（只展开配置，不启动容器，也不会加载 Reranker 模型）。
 2. 构建并启动两个容器，等待 Nginx 和 FastAPI 可用。
-3. 验证 Vue 静态页面、两个健康接口以及默认 RAG 配置与 Compose 保持一致。
+3. 验证 Vue 静态页面、两个健康接口，以及容器实际收到的 RAG/LLM 设置是安全默认值。
 4. 通过 Nginx 上传一份临时 TXT 文档。
 5. 确认 Hugging Face 缓存非空并写入唯一卷标记。
 6. 执行 `docker compose down` 和 `docker compose up -d`，真正重新创建容器但保留具名卷。
 7. 验证上传文档及其元数据仍存在、启动时重建的索引能检索到该文档、模型缓存标记仍存在。
 8. 删除临时文档和测试标记，保留正常模型缓存，并让服务继续运行。
+
+脚本与本地环境隔离：每次 Compose 调用都会使用一个临时生成的环境文件（只含安全默认值）并通过净化后的进程环境运行，因此即使本地根目录 `.env` 或当前 shell 导出了 `LLM_*` / `RAG_*` 变量，测试启动的容器也只会收到 `RAG_RERANKER_ENABLED=false`、`RAG_RERANKER_CANDIDATE_TOP_K=15`、`RAG_MIN_RELEVANCE_SCORE=0.35` 和空的 LLM 配置——绝不会启用真实 Reranker 或携带真实 LLM 凭据。脚本校验的也正是这些默认值；临时环境文件在测试结束后删除。
 
 默认等待后端最多 900 秒。模型已经构建且只想复用镜像时：
 
