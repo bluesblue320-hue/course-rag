@@ -18,7 +18,11 @@ from src.exceptions import DatabaseConfigurationError
 _SECRET_PASSWORD = "super-secret-test-password"
 
 
-def test_backend_defaults_to_memory() -> None:
+def test_backend_defaults_to_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Without an explicit value the backend is read from the environment, so
+    # the variable must be absent for the default assertion to hold on any
+    # host (a developer machine may export VECTOR_STORE_BACKEND=pgvector).
+    monkeypatch.delenv(VECTOR_STORE_BACKEND_ENV, raising=False)
     assert resolve_vector_store_backend(None) == "memory"
 
 
@@ -82,7 +86,12 @@ def test_backend_invalid_environment_is_rejected(
         resolve_vector_store_backend()
 
 
-def test_memory_backend_accepts_empty_database_url() -> None:
+def test_memory_backend_accepts_empty_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Even if the host exports DATABASE_URL, the memory backend must not
+    # require it; clear the variable so the "no URL" contract is tested.
+    monkeypatch.delenv(DATABASE_URL_ENV, raising=False)
     assert resolve_database_url_for_backend("memory", None) is None
     assert resolve_database_url_for_backend("memory", "") is None
 
@@ -108,7 +117,12 @@ def test_memory_backend_ignores_explicit_invalid_url() -> None:
     assert resolve_database_url_for_backend("memory", "sqlite:///x.db") is None
 
 
-def test_pgvector_backend_requires_database_url() -> None:
+def test_pgvector_backend_requires_database_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A missing URL must raise; clear DATABASE_URL so a host-exported value
+    # cannot silently satisfy the requirement.
+    monkeypatch.delenv(DATABASE_URL_ENV, raising=False)
     with pytest.raises(DatabaseConfigurationError):
         resolve_database_url_for_backend("pgvector", None)
     with pytest.raises(DatabaseConfigurationError):
@@ -167,7 +181,10 @@ def test_error_text_never_contains_password(invalid_url: str) -> None:
     assert _SECRET_PASSWORD not in str(exc_info.value)
 
 
-def test_error_message_is_stable() -> None:
+def test_error_message_is_stable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same isolation: the "pgvector without URL" branch reads DATABASE_URL,
+    # so it must be absent for the stable error message to be produced.
+    monkeypatch.delenv(DATABASE_URL_ENV, raising=False)
     with pytest.raises(DatabaseConfigurationError) as exc_info:
         resolve_database_url_for_backend("pgvector", None)
     assert str(exc_info.value) == "数据库配置无效"
