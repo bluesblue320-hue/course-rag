@@ -79,3 +79,11 @@ class RerankerConfigurationError(RagError):
 
 class RerankerUnavailableError(RagError):
     """Raised when a reranker cannot be loaded or called."""
+
+
+class DatabaseConfigurationError(RagError):
+    """Raised when database configuration is invalid."""
+
+
+class DatabaseConnectionError(RagError):
+    """Raised when the database cannot be reached."""
