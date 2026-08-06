@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege token: the workflow only reads the repository contents and
+# never needs write access to issues, PRs, or the codebase itself.
+permissions:
+  contents: read
+
+# Only one workflow run per branch at a time; a newer push cancels the older
+# in-progress run so no stale checks pile up.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   backend:
     name: Backend (pytest, syntax, compose config)
@@ -13,20 +24,30 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # Offline guards: the test suite injects fake embedding/reranker
+      # models, and these variables make any accidental model download fail
+      # fast instead of silently hitting the network.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SENTENCE_TRANSFORMERS_HOME: /tmp/sentence-transformers
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
 
-      - name: Install backend dependencies
+      - name: Install CPU-only PyTorch
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.13.0"
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
 
       - name: Python syntax check
         run: python -m compileall -q src scripts tests
@@ -45,10 +66,10 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
