@@ -39,6 +39,10 @@ jobs:
       RAG_RERANKER_MODEL: ""
       RAG_RERANKER_CANDIDATE_TOP_K: "15"
       RAG_MIN_RELEVANCE_SCORE: "0.35"
+      # The database foundation is provisioned but inactive: the default
+      # backend stays memory and no real PostgreSQL is started in CI.
+      VECTOR_STORE_BACKEND: "memory"
+      DATABASE_URL: ""
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       HF_HOME: /tmp/course-rag-hf
@@ -94,6 +98,20 @@ jobs:
 
       - name: Docker Compose config check
         run: docker compose config --quiet
+
+      # Compiles the Alembic migration chain to SQL without starting a real
+      # PostgreSQL container: DATABASE_URL only needs to be a valid scheme,
+      # and offline generation never opens a connection.
+      - name: Compile Alembic upgrade SQL
+        env:
+          DATABASE_URL: postgresql+psycopg://course_rag:course_rag@localhost:5432/course_rag
+        run: |
+          alembic upgrade head --sql > /tmp/alembic-upgrade.sql
+          test -s /tmp/alembic-upgrade.sql
+          grep -q "CREATE EXTENSION IF NOT EXISTS vector" /tmp/alembic-upgrade.sql
+          grep -q "CREATE TABLE documents" /tmp/alembic-upgrade.sql
+          grep -q "CREATE TABLE chunks" /tmp/alembic-upgrade.sql
+          grep -qi "VECTOR(384)" /tmp/alembic-upgrade.sql
 
   frontend:
     name: Frontend (vitest, type-check, build)
