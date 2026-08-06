@@ -38,10 +38,11 @@
 - 通过 `python -m scripts.evaluate_rag` 输出 Hit@K、Recall@K、MRR 与回答/拒答混淆矩阵
 - 在 calibration split 上扫描相似度阈值并给出确定性的推荐值，不自动改写生产配置
 - 提供 FastAPI、Vue 构建、Nginx 反向代理、具名卷和健康检查组成的 Docker Compose 一键启动方案
+- 提供 PostgreSQL + pgvector 数据库基础设施：`documents` 与 `chunks` 表、`VECTOR(384)` 列、Alembic 迁移和 `src/database/` 配置模块（`VECTOR_STORE_BACKEND=memory` 仍为默认，PostgreSQL 尚未接管 RAG 请求）
 
 ## 当前没有实现
 
-本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、数据库、向量数据库、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、BM25 或混合检索。评估只覆盖检索质量与拒答决策，不评估生成答案的质量，也不评估答案忠实度。本地 JSON 和文件系统只是当前实现，不代表生产级存储方案。
+本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、向量数据库接入、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、BM25 或混合检索。已提供 PostgreSQL + pgvector 的 schema 与 Alembic migration，但生产 RAG 仍默认使用内存索引和 JSON 元数据，`PgVectorStore` 尚未接入，上传、删除、检索和问答仍走原有内存流程。评估只覆盖检索质量与拒答决策，不评估生成答案的质量，也不评估答案忠实度。本地 JSON 和文件系统只是当前实现，不代表生产级存储方案。
 
 ## 项目目录
 
@@ -68,6 +69,7 @@ course-rag/
 │   ├── generation.py         # 调用 OpenAI-compatible LLM
 │   ├── rag_service.py        # 编排完整 RAG 调用链
 │   ├── exceptions.py         # RAG 与文档领域异常
+│   ├── database/             # PostgreSQL + pgvector 基础设施（配置、engine、ORM 模型）
 │   ├── evaluation/           # 离线评估库（数据集、语料、指标、阈值、报告）
 │   └── main.py               # 命令行入口
 ├── eval/                     # 评估基准：受控语料、清单与标注数据集
@@ -87,8 +89,11 @@ course-rag/
 │   ├── src/components/       # 检索、答案、文档管理与状态组件
 │   └── README.md             # 前端运行与学习说明
 ├── docs/docker.md            # Docker Compose 使用、持久化测试与排障
+├── docs/database.md          # PostgreSQL + pgvector 数据库基础设施指南
 ├── Dockerfile                # FastAPI CPU 运行镜像
 ├── compose.yaml              # 本地完整应用编排和具名卷
+├── alembic.ini               # Alembic 迁移配置
+├── migrations/               # Alembic 迁移环境与 schema 版本
 ├── requirements.txt          # Python 依赖
 └── README.md                 # 学习说明
 ```
@@ -289,6 +294,33 @@ docker compose up --build -d
 
 完整配置、健康检查、停止/重启、数据卷说明和自动化重建持久化测试见 [Docker Compose 使用指南](docs/docker.md)。
 
+## PostgreSQL 与 pgvector 数据库
+
+本项目已提供 PostgreSQL + pgvector 数据库基础设施，但**默认不参与 RAG 请求**：
+
+- `VECTOR_STORE_BACKEND=memory` 是默认后端：现有 `DocumentRepository`（`documents.json`）和 `KnowledgeIndex`（NumPy 余弦相似度）继续负责上传、删除、检索和问答
+- `src/database/` 提供 SQLAlchemy 2.x engine、session、Declarative Base 和 `documents` / `chunks` ORM 模型；`chunks.embedding` 为 `VECTOR(384)`，与默认 Embedding 模型维度一致
+- Alembic 迁移在首次 `upgrade` 时启用 `vector` 扩展并创建两张表；应用启动**不会**自动执行迁移，数据库 schema 变更始终是显式运维动作
+- `PgVectorStore` 尚未实现，现有数据不会被迁移，API 响应结构不变
+
+最小启动与迁移流程（详见 [docs/database.md](docs/database.md)）：
+
+```powershell
+# 启动数据库（仅 Compose 网络内可见，不映射宿主机端口）
+docker compose up -d db
+
+# 重建 backend 镜像以包含新依赖和迁移文件，然后执行迁移
+docker compose build backend
+docker compose run --rm backend alembic upgrade head
+```
+
+移除数据库并保留具名卷：
+
+```powershell
+docker compose down          # 不删除任何具名卷
+docker compose down --volumes  # 显式删除全部数据卷（含 postgres-data）时使用
+```
+
 ## 运行测试
 
 ```powershell
@@ -442,4 +474,4 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 ## 当前范围之外
 
-当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新，另有一份离线的检索与拒答评估基准。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、数据库、向量数据库、pgvector、对象存储、用户登录与多用户隔离、后台任务队列、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。评估只覆盖检索质量与拒答决策，生成答案质量与答案忠实度的评估也未实现。本地 JSON 与文件系统只是当前阶段的存储实现，没有声称支持生产级并发和扩展。
+当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新，另有一份离线的检索与拒答评估基准。数据库方面已提供 PostgreSQL + pgvector 的 schema、ORM 模型和 Alembic migration，但 `PgVectorStore` 尚未接入，上传、删除和检索仍走现有内存与 JSON 流程。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、对象存储、用户登录与多用户隔离、后台任务队列、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。评估只覆盖检索质量与拒答决策，生成答案质量与答案忠实度的评估也未实现。本地 JSON 与文件系统只是当前阶段的存储实现，没有声称支持生产级并发和扩展。
