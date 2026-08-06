@@ -158,14 +158,14 @@ python scripts/docker_smoke_test.py
 
 1. 用临时环境变量执行 `docker compose config`，验证 Reranker/阈值等设置可以被显式覆盖（只展开配置，不启动容器，也不会加载 Reranker 模型）。
 2. 构建并启动两个容器，等待 Nginx 和 FastAPI 可用。
-3. 验证 Vue 静态页面、两个健康接口，以及容器实际收到的 RAG/LLM 设置是安全默认值。
-4. 通过 Nginx 上传一份临时 TXT 文档。
+3. 验证 Vue 静态页面、两个健康接口，以及容器实际收到的 RAG/LLM 设置是安全默认值；确认健康接口不泄露任何密钥。
+4. 通过 Nginx 上传一份带唯一随机令牌的临时 TXT 文档（文件名和内容都包含该令牌，避免与历史残留数据混淆）。
 5. 确认 Hugging Face 缓存非空并写入唯一卷标记。
 6. 执行 `docker compose down` 和 `docker compose up -d`，真正重新创建容器但保留具名卷。
-7. 验证上传文档及其元数据仍存在、启动时重建的索引能检索到该文档、模型缓存标记仍存在。
-8. 删除临时文档和测试标记，保留正常模型缓存，并让服务继续运行。
+7. 验证上传文档及其元数据仍存在、启动时重建的索引能检索到该文档（按令牌检索）、模型缓存标记仍存在。
+8. 删除临时文档和测试标记，并验证元数据、上传文件、缓存标记都已真正清除，服务继续运行。
 
-脚本与本地环境隔离：每次 Compose 调用都会使用一个临时生成的环境文件（只含安全默认值）并通过净化后的进程环境运行，因此即使本地根目录 `.env` 或当前 shell 导出了 `LLM_*` / `RAG_*` 变量，测试启动的容器也只会收到 `RAG_RERANKER_ENABLED=false`、`RAG_RERANKER_CANDIDATE_TOP_K=15`、`RAG_MIN_RELEVANCE_SCORE=0.35` 和空的 LLM 配置——绝不会启用真实 Reranker 或携带真实 LLM 凭据。脚本校验的也正是这些默认值；临时环境文件在测试结束后删除。
+脚本与本地环境隔离：每次 Compose 调用都会使用一个临时生成的环境文件（只含安全默认值）并通过净化后的进程环境运行，因此即使本地根目录 `.env` 或当前 shell 导出了 `LLM_*` / `RAG_*` 变量，测试启动的容器也只会收到 `RAG_RERANKER_ENABLED=false`、`RAG_RERANKER_CANDIDATE_TOP_K=15`、`RAG_MIN_RELEVANCE_SCORE=0.35` 和空的 LLM 配置——绝不会启用真实 Reranker 或携带真实 LLM 凭据。脚本校验的也正是这些默认值，并额外验证后端容器以非 root 用户运行、镜像内没有复制根目录 `.env`、容器环境变量中没有非空的 LLM/RAG 值；临时环境文件在测试结束后删除。
 
 默认等待后端最多 900 秒。模型已经构建且只想复用镜像时：
 
@@ -173,7 +173,7 @@ python scripts/docker_smoke_test.py
 python scripts/docker_smoke_test.py --skip-build
 ```
 
-更换端口后需要同步传入地址：
+更换端口后只需传入新的地址，脚本会从 `--base-url` 自动解析端口并写入隔离环境文件，容器映射与测试访问的端口保持一致：
 
 ```powershell
 python scripts/docker_smoke_test.py --base-url http://127.0.0.1:18080

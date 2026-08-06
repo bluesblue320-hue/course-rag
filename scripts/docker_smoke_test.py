@@ -18,6 +18,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -34,9 +35,11 @@ _SENSITIVE_ENV_PREFIXES = ("LLM_", "RAG_")
 _SENSITIVE_ENV_KEYS = frozenset({"APP_PORT", "MAX_UPLOAD_BYTES"})
 
 #: Safe values written into the isolated env file passed to Compose, so the
-#: project-root ``.env`` (if any) is ignored for interpolation.
-ISOLATED_ENV_FILE_CONTENT = """\
-APP_PORT=8080
+#: project-root ``.env`` (if any) is ignored for interpolation.  ``{port}``
+#: is filled with the port parsed from ``--base-url`` so the published
+#: container port always matches the URL the test actually polls.
+ISOLATED_ENV_FILE_TEMPLATE = """\
+APP_PORT={port}
 LLM_API_KEY=
 LLM_BASE_URL=
 LLM_MODEL=
@@ -62,7 +65,15 @@ def _sanitized_environment() -> dict[str, str]:
     }
 
 
-def _write_isolated_env_file() -> Path:
+def _port_from_base_url(base_url: str) -> int:
+    """Extract the port from a ``http://host:port`` base URL."""
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.port is not None:
+        return parsed.port
+    return 8080
+
+
+def _write_isolated_env_file(port: int) -> Path:
     """Create a temporary env file with safe defaults for Compose to use."""
     handle = tempfile.NamedTemporaryFile(
         mode="w",
@@ -72,7 +83,7 @@ def _write_isolated_env_file() -> Path:
         delete=False,
     )
     with handle:
-        handle.write(ISOLATED_ENV_FILE_CONTENT)
+        handle.write(ISOLATED_ENV_FILE_TEMPLATE.format(port=port))
     return Path(handle.name)
 
 
@@ -171,12 +182,17 @@ def wait_until_ready(base_url: str, timeout_seconds: float) -> dict[str, Any]:
     )
 
 
-def upload_test_document(base_url: str) -> dict[str, Any]:
-    """Upload one deterministic text fixture through the Nginx proxy."""
+def upload_test_document(base_url: str, token: str) -> dict[str, Any]:
+    """Upload one unique text fixture through the Nginx proxy.
+
+    ``token`` is embedded in the filename and content so that a stale
+    document left behind by an earlier failed run can never be mistaken for
+    the document uploaded by this run.
+    """
     boundary = f"----course-rag-{uuid4().hex}"
-    filename = "docker-persistence-test.txt"
+    filename = f"docker-persistence-{token}.txt"
     content = (
-        "Docker 持久化验证口令：蓝鲸石英灯塔。\n"
+        f"Docker 持久化验证口令：蓝鲸石英灯塔-{token}。\n"
         "该文档仅用于验证上传文件、元数据和重建后的检索索引。\n"
     ).encode("utf-8")
     body = (
@@ -250,6 +266,58 @@ def assert_default_rag_settings() -> dict[str, str]:
             f"{settings} != {expected}"
         )
     return settings
+
+
+def assert_security_posture() -> dict[str, Any]:
+    """Verify the backend container security posture.
+
+    Checks, inside the running backend container, that the process does not
+    run as root, that no ``.env`` was copied into the image, and that no
+    credential-like ``LLM_*`` / ``RAG_*`` variable carries a non-empty
+    value.  Only credential/path variables are inspected here; benign
+    defaults such as ``RAG_RERANKER_ENABLED=false`` or
+    ``RAG_MIN_RELEVANCE_SCORE=0.35`` are validated separately by
+    ``assert_default_rag_settings``.
+    """
+    credential_vars = (
+        "LLM_API_KEY",
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+        "RAG_RERANKER_MODEL",
+    )
+    probe = (
+        "import json, os; from pathlib import Path; "
+        "print(json.dumps({"
+        "'uid': os.getuid(), "
+        "'has_root_env': Path('/app/.env').exists(), "
+        "'credentials': {k: os.environ.get(k) for k in "
+        + repr(credential_vars)
+        + " if os.environ.get(k)}"
+        "}))"
+    )
+    raw = backend_python(probe)
+    posture = json.loads(raw)
+    if posture["uid"] == 0:
+        raise AssertionError(f"backend container is running as root: {posture}")
+    if posture["has_root_env"]:
+        raise AssertionError(f"root .env was copied into the image: {posture}")
+    if posture["credentials"]:
+        raise AssertionError(
+            f"credential variables leaked into the container: "
+            f"{posture['credentials']}"
+        )
+    return posture
+
+
+def assert_health_no_secrets(base_url: str, health: dict[str, Any]) -> None:
+    """Verify the health payload exposes no credential-like values."""
+    serialized = json.dumps(health, ensure_ascii=False)
+    markers = ("sk-", "Bearer ", "api_key", "API_KEY", "password", "token=")
+    for marker in markers:
+        if marker in serialized:
+            raise AssertionError(
+                f"health payload may leak a secret ({marker!r}): {health}"
+            )
 
 
 def assert_compose_interpolation() -> None:
@@ -328,6 +396,7 @@ def remove_cache_marker(marker_path: str) -> None:
 def assert_document_persisted(
     base_url: str,
     uploaded: dict[str, Any],
+    token: str,
 ) -> dict[str, Any]:
     """Verify metadata and the rebuilt index still contain the upload."""
     document_id = uploaded["document_id"]
@@ -354,7 +423,7 @@ def assert_document_persisted(
         base_url,
         "/api/search",
         method="POST",
-        payload={"query": "蓝鲸石英灯塔 Docker 持久化验证口令", "top_k": 10},
+        payload={"query": f"蓝鲸石英灯塔-{token} Docker 持久化验证口令", "top_k": 10},
     )
     result_ids = {
         result.get("document_id")
@@ -366,6 +435,58 @@ def assert_document_persisted(
             "uploaded document metadata survived, but the rebuilt index "
             f"did not return it: {search}"
         )
+    return listing
+
+
+def uploaded_file_count() -> int:
+    """Return how many files currently live in the runtime uploads volume."""
+    raw = backend_python(
+        "import os; from pathlib import Path; "
+        "root = Path('/app/data/runtime/uploads'); "
+        "print(sum(1 for path in root.iterdir() if path.is_file()))"
+    )
+    return int(raw.strip())
+
+
+def assert_cleanup_complete(
+    base_url: str,
+    uploaded: dict[str, Any],
+    marker_path: str,
+    uploads_before_delete: int,
+) -> dict[str, Any]:
+    """Verify the temporary document, its file, and the marker are gone.
+
+    After ``DELETE /documents/{id}`` the metadata must disappear from the
+    listing, the uploaded file must be removed from the runtime volume, and
+    the cache marker must no longer exist.
+    """
+    document_id = uploaded["document_id"]
+
+    listing = request_json(base_url, "/api/documents")
+    matches = [
+        document
+        for document in listing.get("documents", [])
+        if document.get("document_id") == document_id
+    ]
+    if matches:
+        raise AssertionError(
+            f"deleted document {document_id} is still listed: {listing}"
+        )
+
+    uploads_after_delete = uploaded_file_count()
+    if uploads_after_delete >= uploads_before_delete:
+        raise AssertionError(
+            "uploaded file was not removed from the runtime volume: "
+            f"uploads before delete {uploads_before_delete}, after {uploads_after_delete}"
+        )
+
+    marker_exists = backend_python(
+        "from pathlib import Path; "
+        f"print(Path({marker_path!r}).exists())"
+    ).strip()
+    if marker_exists == "True":
+        raise AssertionError(f"cache marker was not removed: {marker_path}")
+
     return listing
 
 
@@ -401,17 +522,24 @@ def main() -> int:
     args = parse_args()
     marker_token = hashlib.sha256(uuid4().bytes).hexdigest()
     marker_path = f"/cache/huggingface/.course-rag-test-{uuid4().hex}"
+    test_token = uuid4().hex[:12]
 
-    _isolated_env_file = _write_isolated_env_file()
+    port = _port_from_base_url(args.base_url)
+    _isolated_env_file = _write_isolated_env_file(port)
     try:
-        return _run(args, marker_token, marker_path)
+        return _run(args, marker_token, marker_path, test_token)
     finally:
         if _isolated_env_file is not None:
             _isolated_env_file.unlink(missing_ok=True)
             _isolated_env_file = None
 
 
-def _run(args: argparse.Namespace, marker_token: str, marker_path: str) -> int:
+def _run(
+    args: argparse.Namespace,
+    marker_token: str,
+    marker_path: str,
+    test_token: str,
+) -> int:
     print("[1/7] Verifying Compose interpolation and starting the stack...")
     assert_compose_interpolation()
     up_arguments = ["up", "-d"]
@@ -422,10 +550,12 @@ def _run(args: argparse.Namespace, marker_token: str, marker_path: str) -> int:
     print("[2/7] Waiting for Nginx and FastAPI readiness...")
     initial_health = wait_until_ready(args.base_url, args.timeout_seconds)
     assert_frontend(args.base_url)
+    assert_health_no_secrets(args.base_url, initial_health)
     rag_settings = assert_default_rag_settings()
+    security_posture = assert_security_posture()
 
     print("[3/7] Uploading a persistence test document...")
-    uploaded = upload_test_document(args.base_url)
+    uploaded = upload_test_document(args.base_url, test_token)
 
     print("[4/7] Recording the Hugging Face cache and volume marker...")
     cache_before = cache_stats()
@@ -438,7 +568,7 @@ def _run(args: argparse.Namespace, marker_token: str, marker_path: str) -> int:
 
     print("[6/7] Verifying restored metadata, file, index, and model cache...")
     assert_frontend(args.base_url)
-    listing = assert_document_persisted(args.base_url, uploaded)
+    listing = assert_document_persisted(args.base_url, uploaded, test_token)
     cache_after = cache_stats()
     if read_cache_marker(marker_path) != marker_token:
         raise AssertionError("Hugging Face cache marker did not survive recreation")
@@ -448,12 +578,19 @@ def _run(args: argparse.Namespace, marker_token: str, marker_path: str) -> int:
         )
 
     print("[7/7] Removing only the temporary test document and marker...")
+    uploads_before_delete = uploaded_file_count()
     request_json(
         args.base_url,
         f"/api/documents/{uploaded['document_id']}",
         method="DELETE",
     )
     remove_cache_marker(marker_path)
+    cleanup_listing = assert_cleanup_complete(
+        args.base_url,
+        uploaded,
+        marker_path,
+        uploads_before_delete,
+    )
 
     summary = {
         "status": "passed",
@@ -461,10 +598,13 @@ def _run(args: argparse.Namespace, marker_token: str, marker_path: str) -> int:
         "initial_health": initial_health,
         "restarted_health": restarted_health,
         "rag_settings": rag_settings,
+        "security_posture": security_posture,
+        "test_token": test_token,
         "restored_document_id": uploaded["document_id"],
         "restored_document_count": listing["document_count"],
         "cache_before": cache_before,
         "cache_after": cache_after,
+        "cleanup_document_count": cleanup_listing["document_count"],
         "stack_left_running": True,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
