@@ -1,5 +1,6 @@
 """Offline tests for the document ingestion and deletion service."""
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -546,8 +547,22 @@ def test_reconcile_delete_failure_does_not_break_valid_startup(
         "../../escape.txt",
         "../escape.txt",
         "nested/file.txt",
-        "..\\escape.txt",
-        "..\\..\\escape.txt",
+        # Backslash is a path separator on Windows but an ordinary filename
+        # character on POSIX, so these two cases only apply on Windows.
+        pytest.param(
+            "..\\escape.txt",
+            marks=pytest.mark.skipif(
+                os.name != "nt",
+                reason="backslash is not a path separator on POSIX",
+            ),
+        ),
+        pytest.param(
+            "..\\..\\escape.txt",
+            marks=pytest.mark.skipif(
+                os.name != "nt",
+                reason="backslash is not a path separator on POSIX",
+            ),
+        ),
         "C:/absolute/escape.txt",
         "/absolute/escape.txt",
     ],
