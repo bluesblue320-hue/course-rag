@@ -59,21 +59,25 @@ LLM_API_KEY=
 LLM_BASE_URL=
 LLM_MODEL=
 LLM_TIMEOUT_SECONDS=30
-RAG_RERANKER_ENABLED=false
 RAG_MIN_RELEVANCE_SCORE=0.35
 MAX_UPLOAD_BYTES=10485760
+RAG_RERANKER_ENABLED=false
+RAG_RERANKER_MODEL=
+RAG_RERANKER_CANDIDATE_TOP_K=15
 ```
 
 `LLM_API_KEY` 和 `LLM_MODEL` 为空时，容器仍可完成健康检查、语义检索和文档管理；只有智能问答返回现有的 LLM 未配置提示。
 
-本阶段的 Compose 配置固定：
+Compose 为 RAG 相关设置提供与应用程序内建默认一致的安全默认值：Reranker 默认关闭、相关性阈值默认 `0.35`、Reranker 候选池默认 `15`：
 
 ```env
 RAG_RERANKER_ENABLED=false
+RAG_RERANKER_MODEL=
+RAG_RERANKER_CANDIDATE_TOP_K=15
 RAG_MIN_RELEVANCE_SCORE=0.35
 ```
 
-即使本地 `.env` 写入不同值，Compose 启动的后端仍使用以上两个值，避免本阶段演示行为漂移。`MAX_UPLOAD_BYTES` 默认仍为 `10485760`。Nginx 的请求体上限略高于 10 MiB，用来容纳 multipart 头部；实际文件大小仍由 FastAPI 按 `MAX_UPLOAD_BYTES` 校验。
+这些默认值不是永久固定的：用户可以通过本地 `.env` 或进程环境变量显式覆盖，Compose 会把覆盖后的值原样透传给后端。未配置时容器行为与直接运行 `uvicorn src.api:app` 完全一致（Reranker 关闭、相关性阈值 0.35）。`scripts/docker_smoke_test.py` 会校验容器实际收到的默认值与 Compose 配置一致，防止透传漂移；默认 Smoke Test 不启用 Reranker，Docker 验证流程也不会下载 Reranker 模型。首次启动后端仍可能下载默认 Embedding 模型。`MAX_UPLOAD_BYTES` 默认仍为 `10485760`。Nginx 的请求体上限略高于 10 MiB，用来容纳 multipart 头部；实际文件大小仍由 FastAPI 按 `MAX_UPLOAD_BYTES` 校验。
 
 `.env` 可能包含密钥，已被 Git 和 Docker 构建上下文排除。不要提交或分享 `docker compose config` 的完整输出，因为其中可能包含展开后的环境变量。
 
@@ -152,13 +156,14 @@ python scripts/docker_smoke_test.py
 
 脚本会依次：
 
-1. 构建并启动两个容器，等待 Nginx 和 FastAPI 可用。
-2. 验证 Vue 静态页面、两个健康接口以及固定的 RAG 配置。
-3. 通过 Nginx 上传一份临时 TXT 文档。
-4. 确认 Hugging Face 缓存非空并写入唯一卷标记。
-5. 执行 `docker compose down` 和 `docker compose up -d`，真正重新创建容器但保留具名卷。
-6. 验证上传文档及其元数据仍存在、启动时重建的索引能检索到该文档、模型缓存标记仍存在。
-7. 删除临时文档和测试标记，保留正常模型缓存，并让服务继续运行。
+1. 用临时环境变量执行 `docker compose config`，验证 Reranker/阈值等设置可以被显式覆盖（只展开配置，不启动容器，也不会加载 Reranker 模型）。
+2. 构建并启动两个容器，等待 Nginx 和 FastAPI 可用。
+3. 验证 Vue 静态页面、两个健康接口以及默认 RAG 配置与 Compose 保持一致。
+4. 通过 Nginx 上传一份临时 TXT 文档。
+5. 确认 Hugging Face 缓存非空并写入唯一卷标记。
+6. 执行 `docker compose down` 和 `docker compose up -d`，真正重新创建容器但保留具名卷。
+7. 验证上传文档及其元数据仍存在、启动时重建的索引能检索到该文档、模型缓存标记仍存在。
+8. 删除临时文档和测试标记，保留正常模型缓存，并让服务继续运行。
 
 默认等待后端最多 900 秒。模型已经构建且只想复用镜像时：
 
@@ -223,4 +228,4 @@ docker compose down
 
 ## 当前部署边界
 
-这是本地演示和后续单机云部署的基础方案，不包含 TLS、身份认证、数据库、对象存储、多副本共享存储、GPU、Kubernetes 或自动化发布。具名卷属于当前 Docker 主机；迁移到另一台主机前需要单独备份。云部署阶段还应在外层补充 HTTPS、密钥管理和访问控制。
+这是本地演示和后续单机云部署的基础方案，不包含 TLS、身份认证、数据库、对象存储、多副本共享存储、GPU、Kubernetes 或自动化发布。后端不向宿主机发布端口、容器以非 root 用户运行并启用 `no-new-privileges`，密钥只通过 `.env` 注入、不写入镜像。具名卷属于当前 Docker 主机；迁移到另一台主机前需要单独备份。云部署阶段还应在外层补充 HTTPS、密钥管理和访问控制。

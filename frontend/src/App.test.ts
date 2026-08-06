@@ -104,10 +104,6 @@ function modeButtons(wrapper: VueWrapper) {
   return wrapper.findAll(".mode-switch button")
 }
 
-function sidebarButtons(wrapper: VueWrapper) {
-  return wrapper.findAll(".sidebar nav button")
-}
-
 describe("App", () => {
   it("defaults to intelligent Q&A and submits a trimmed top-3 ask request", async () => {
     const askMethod = vi.fn().mockResolvedValue(askResponse)
@@ -308,7 +304,7 @@ describe("App", () => {
     }
     const wrapper = mountApp(undefined, undefined, documentService)
 
-    await sidebarButtons(wrapper)[1].trigger("click")
+    await modeButtons(wrapper)[2].trigger("click")
 
     expect(wrapper.text()).toContain("知识库管理")
     expect(wrapper.text()).toContain("上传课程资料")
@@ -316,28 +312,6 @@ describe("App", () => {
     expect(wrapper.get("textarea").isVisible()).toBe(false)
     await flushPromises()
     expect(listDocuments).toHaveBeenCalled()
-  })
-
-  it("opens the learning guide without making service requests", async () => {
-    const askMethod = vi.fn().mockResolvedValue(askResponse)
-    const searchMethod = vi.fn().mockResolvedValue(searchResponse)
-    const wrapper = mountApp({ ask: askMethod }, { search: searchMethod })
-
-    await sidebarButtons(wrapper)[2].trigger("click")
-
-    expect(wrapper.text()).toContain("学习说明")
-    expect(wrapper.text()).toContain("推荐学习流程")
-    expect(wrapper.findAll(".workflow-list li")).toHaveLength(3)
-    expect(modeButtons(wrapper)).toHaveLength(0)
-    expect(wrapper.get("textarea").isVisible()).toBe(false)
-    expect(askMethod).not.toHaveBeenCalled()
-    expect(searchMethod).not.toHaveBeenCalled()
-    expect(wrapper.get('[aria-current="page"]').text()).toBe("学习说明")
-
-    await sidebarButtons(wrapper)[0].trigger("click")
-    expect(wrapper.get(".page-header h1").text()).toBe("课程知识问答")
-    expect(modeButtons(wrapper)).toHaveLength(3)
-    expect(modeButtons(wrapper)[0].attributes("aria-pressed")).toBe("true")
   })
 
   it("refreshes the document list after a successful upload", async () => {

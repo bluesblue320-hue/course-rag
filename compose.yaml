@@ -8,14 +8,21 @@ services:
       dockerfile: Dockerfile
     init: true
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     environment:
       LLM_API_KEY: "${LLM_API_KEY:-}"
       LLM_BASE_URL: "${LLM_BASE_URL:-}"
       LLM_MODEL: "${LLM_MODEL:-}"
       LLM_TIMEOUT_SECONDS: "${LLM_TIMEOUT_SECONDS:-30}"
       MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-10485760}"
-      RAG_RERANKER_ENABLED: "false"
-      RAG_MIN_RELEVANCE_SCORE: "0.35"
+      # Passed through from .env or the process environment; defaults match
+      # the application's built-in defaults (reranker off, relevance
+      # threshold 0.35, candidate pool 15). Explicit values override these.
+      RAG_RERANKER_ENABLED: "${RAG_RERANKER_ENABLED:-false}"
+      RAG_RERANKER_MODEL: "${RAG_RERANKER_MODEL:-}"
+      RAG_RERANKER_CANDIDATE_TOP_K: "${RAG_RERANKER_CANDIDATE_TOP_K:-15}"
+      RAG_MIN_RELEVANCE_SCORE: "${RAG_MIN_RELEVANCE_SCORE:-0.35}"
       HF_HOME: /cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /cache/huggingface/sentence-transformers
     expose:
@@ -41,9 +48,11 @@ services:
       context: frontend
       dockerfile: Dockerfile
     restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
     ports:
       - "${APP_PORT:-8080}:80"
     healthcheck:

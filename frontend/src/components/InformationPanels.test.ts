@@ -6,33 +6,12 @@ import IndexSummary from "./IndexSummary.vue"
 import RetrievalExplanation from "./RetrievalExplanation.vue"
 
 describe("information panels", () => {
-  it("renders three ready navigation actions and emits selected areas", async () => {
-    const wrapper = mount(AppSidebar, {
-      props: { modelValue: "ask" },
-    })
-    const buttons = wrapper.findAll("nav button")
+  it("shows the active search area and disabled placeholders", () => {
+    const wrapper = mount(AppSidebar)
 
-    expect(buttons).toHaveLength(3)
     expect(wrapper.get('[aria-current="page"]').text()).toBe("知识问答")
-    expect(wrapper.findAll("button:disabled")).toHaveLength(0)
+    expect(wrapper.findAll('[aria-disabled="true"]')).toHaveLength(2)
     expect(wrapper.text()).toContain("本地知识库 · 已就绪")
-
-    await buttons[1].trigger("click")
-    await buttons[2].trigger("click")
-
-    expect(wrapper.emitted("update:modelValue")).toEqual([
-      ["documents"],
-      ["guide"],
-    ])
-  })
-
-  it("marks the guide as current and disables navigation while busy", () => {
-    const wrapper = mount(AppSidebar, {
-      props: { modelValue: "guide", disabled: true },
-    })
-
-    expect(wrapper.get('[aria-current="page"]').text()).toBe("学习说明")
-    expect(wrapper.findAll("nav button:disabled")).toHaveLength(3)
   })
 
   it("shows current index metadata", () => {

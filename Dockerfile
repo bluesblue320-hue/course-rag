@@ -10,10 +10,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 ARG PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+# Pin the CPU torch wheel so builds are reproducible; verify the exact
+# cp312 manylinux wheel exists on the CPU index before bumping this.
+ARG TORCH_VERSION=2.13.0
 
 COPY requirements.txt ./requirements.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --default-index "${PYTORCH_INDEX_URL}" torch
+    uv pip install --system --default-index "${PYTORCH_INDEX_URL}" "torch==${TORCH_VERSION}"
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements.txt
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -146,23 +147,100 @@ def backend_python(script: str) -> str:
     )
 
 
-def assert_fixed_rag_settings() -> dict[str, str]:
-    """Verify Compose did not drift from this stage's RAG settings."""
+def load_env_defaults() -> dict[str, str]:
+    """Read ``KEY=VALUE`` entries from the root ``.env`` when present.
+
+    Keeps the smoke test standard-library only: Docker Compose resolves the
+    same file when interpolating ``${VAR:-default}`` in ``compose.yaml``.
+    """
+    values: dict[str, str] = {}
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.exists():
+        return values
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key:
+            values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
+def assert_default_rag_settings() -> dict[str, str]:
+    """Verify Compose passes the default RAG settings to the backend.
+
+    Compose uses ``${RAG_RERANKER_ENABLED:-false}``,
+    ``${RAG_RERANKER_CANDIDATE_TOP_K:-15}`` and
+    ``${RAG_MIN_RELEVANCE_SCORE:-0.35}`` with defaults that match the
+    application's built-in defaults.  With no override in the root ``.env``
+    the container values must equal those defaults; an explicit ``.env``
+    value takes precedence and must be passed through unchanged.
+    """
+    configured = load_env_defaults()
+    expected = {
+        "RAG_RERANKER_ENABLED": configured.get(
+            "RAG_RERANKER_ENABLED", "false"
+        ).lower(),
+        "RAG_RERANKER_CANDIDATE_TOP_K": configured.get(
+            "RAG_RERANKER_CANDIDATE_TOP_K", "15"
+        ),
+        "RAG_MIN_RELEVANCE_SCORE": configured.get(
+            "RAG_MIN_RELEVANCE_SCORE", "0.35"
+        ),
+    }
     raw = backend_python(
         "import json, os; "
         "print(json.dumps({"
         "'RAG_RERANKER_ENABLED': os.environ.get('RAG_RERANKER_ENABLED'), "
+        "'RAG_RERANKER_CANDIDATE_TOP_K': os.environ.get('RAG_RERANKER_CANDIDATE_TOP_K'), "
         "'RAG_MIN_RELEVANCE_SCORE': os.environ.get('RAG_MIN_RELEVANCE_SCORE')"
         "}))"
     )
     settings = json.loads(raw)
-    expected = {
-        "RAG_RERANKER_ENABLED": "false",
-        "RAG_MIN_RELEVANCE_SCORE": "0.35",
+    normalized = {
+        key: (value.lower() if value is not None else value)
+        for key, value in settings.items()
     }
-    if settings != expected:
-        raise AssertionError(f"RAG settings changed: {settings}")
+    if normalized != expected:
+        raise AssertionError(
+            f"RAG settings drifted from Compose config: {settings} != {expected}"
+        )
     return settings
+
+
+def assert_compose_interpolation() -> None:
+    """Verify ``${VAR:-default}`` interpolation expands explicit overrides.
+
+    This only runs ``docker compose config`` with temporary environment
+    variables; it never starts containers, so no real Reranker is loaded.
+    The overrides are injected into a child process and cannot leak into the
+    caller's environment.
+    """
+    overrides = {
+        "RAG_RERANKER_ENABLED": "true",
+        "RAG_RERANKER_MODEL": "test/model",
+        "RAG_RERANKER_CANDIDATE_TOP_K": "12",
+        "RAG_MIN_RELEVANCE_SCORE": "0.42",
+    }
+    child_env = {**os.environ, **overrides}
+    completed = subprocess.run(
+        ["docker", "compose", "config"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=child_env,
+    )
+    for key, value in overrides.items():
+        expected_line = f"{key}: {value}"
+        quoted_line = f'{key}: "{value}"'
+        if expected_line not in completed.stdout and quoted_line not in completed.stdout:
+            raise AssertionError(
+                f"Compose did not expand {key}={value!r}; expected "
+                f"{expected_line!r} or {quoted_line!r} in `docker compose config` output"
+            )
 
 
 def cache_stats() -> dict[str, int]:
@@ -280,7 +358,8 @@ def main() -> int:
     marker_token = hashlib.sha256(uuid4().bytes).hexdigest()
     marker_path = f"/cache/huggingface/.course-rag-test-{uuid4().hex}"
 
-    print("[1/7] Starting the Docker Compose stack...")
+    print("[1/7] Verifying Compose interpolation and starting the stack...")
+    assert_compose_interpolation()
     up_arguments = ["up", "-d"]
     if not args.skip_build:
         up_arguments.insert(1, "--build")
@@ -289,7 +368,7 @@ def main() -> int:
     print("[2/7] Waiting for Nginx and FastAPI readiness...")
     initial_health = wait_until_ready(args.base_url, args.timeout_seconds)
     assert_frontend(args.base_url)
-    fixed_settings = assert_fixed_rag_settings()
+    rag_settings = assert_default_rag_settings()
 
     print("[3/7] Uploading a persistence test document...")
     uploaded = upload_test_document(args.base_url)
@@ -327,7 +406,7 @@ def main() -> int:
         "base_url": args.base_url,
         "initial_health": initial_health,
         "restarted_health": restarted_health,
-        "fixed_rag_settings": fixed_settings,
+        "rag_settings": rag_settings,
         "restored_document_id": uploaded["document_id"],
         "restored_document_count": listing["document_count"],
         "cache_before": cache_before,
