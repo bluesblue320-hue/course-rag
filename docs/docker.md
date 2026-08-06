@@ -17,16 +17,20 @@ frontend 容器（Nginx + Vue 静态文件）
                                   ├── /search
                                   ├── /ask
                                   └── /documents
+
+db 容器（pgvector/pgvector:pg17）
+  └── 只在 Compose 网络内暴露 5432；默认不映射宿主机端口
 ```
 
-Compose 启动两个服务：
+Compose 启动三个服务：
 
 | 服务 | 内容 | 对外端口 | 健康检查 |
 | --- | --- | --- | --- |
 | `backend` | FastAPI、Embedding 模型和现有内存索引 | 不直接发布 | 容器内请求 `/health` |
 | `frontend` | 多阶段构建的 Vue 静态文件和 Nginx 反向代理 | 默认 `8080` | 请求 `/nginx-health` |
+| `db` | PostgreSQL 17 + pgvector 扩展（基础设施） | 不发布 | `pg_isready` |
 
-后端只在 Compose 内部网络暴露 `8000`，浏览器继续使用现有 `/api/*` 路径。Nginx 转发时移除 `/api` 前缀，因此 FastAPI 的 `/health`、`/search`、`/ask` 和 `/documents` 路径均保持不变。
+后端只在 Compose 内部网络暴露 `8000`，浏览器继续使用现有 `/api/*` 路径。Nginx 转发时移除 `/api` 前缀，因此 FastAPI 的 `/health`、`/search`、`/ask` 和 `/documents` 路径均保持不变。`db` 服务是**准备好的基础设施**：默认 `VECTOR_STORE_BACKEND=memory`，后端不连接数据库，`db` 未启动也不影响后端运行。
 
 ## 前置条件
 
@@ -64,9 +68,16 @@ MAX_UPLOAD_BYTES=10485760
 RAG_RERANKER_ENABLED=false
 RAG_RERANKER_MODEL=
 RAG_RERANKER_CANDIDATE_TOP_K=15
+VECTOR_STORE_BACKEND=memory
+POSTGRES_DB=course_rag
+POSTGRES_USER=course_rag
+POSTGRES_PASSWORD=course_rag
+DATABASE_URL=postgresql+psycopg://course_rag:course_rag@db:5432/course_rag
 ```
 
 `LLM_API_KEY` 和 `LLM_MODEL` 为空时，容器仍可完成健康检查、语义检索和文档管理；只有智能问答返回现有的 LLM 未配置提示。
+
+数据库变量是基础设施默认值：`VECTOR_STORE_BACKEND=memory` 时后端不会连接数据库，`DATABASE_URL` 只在显式执行 `alembic` 迁移（或未来切换 `pgvector` 后端）时使用。这些是本地开发值，生产环境必须替换密码。
 
 Compose 为 RAG 相关设置提供与应用程序内建默认一致的安全默认值：Reranker 默认关闭、相关性阈值默认 `0.35`、Reranker 候选池默认 `15`：
 
@@ -118,18 +129,20 @@ Invoke-WebRequest http://127.0.0.1:8080/nginx-health
 
 ## 持久化
 
-Compose 使用两个具名卷：
+Compose 使用三个具名卷：
 
 | 卷 | 容器挂载点 | 保存内容 |
 | --- | --- | --- |
 | `course-rag-runtime` | `/app/data/runtime` | `uploads/` 上传原文件和 `documents.json` 元数据 |
 | `course-rag-huggingface-cache` | `/cache/huggingface` | 默认 Embedding 模型等 Hugging Face 缓存 |
+| `course-rag-postgres-data` | `/var/lib/postgresql/data` | PostgreSQL 数据目录（基础设施，默认不参与 RAG） |
 
 查看卷：
 
 ```powershell
 docker volume inspect course-rag-runtime
 docker volume inspect course-rag-huggingface-cache
+docker volume inspect course-rag-postgres-data
 ```
 
 普通停止、重启和重新创建容器不会删除具名卷：
@@ -140,11 +153,31 @@ docker compose down
 docker compose up -d
 ```
 
-`docker compose down` 只删除容器和网络，上传文档、元数据和模型缓存仍在。以下命令会永久删除本项目的两个具名卷，只有明确要清空所有上传数据和模型缓存时才执行：
+`docker compose down` 只删除容器和网络，上传文档、元数据、模型缓存和数据库数据仍在。以下命令会永久删除本项目的三个具名卷，只有明确要清空所有数据时才执行：
 
 ```powershell
 docker compose down --volumes
 ```
+
+## 数据库迁移
+
+`db` 服务默认不映射宿主机端口，只在 Compose 网络内可见。启动并迁移数据库：
+
+```powershell
+docker compose up -d db
+docker compose build backend          # 镜像需包含新依赖与迁移文件
+docker compose run --rm backend alembic upgrade head
+docker compose run --rm backend alembic current
+```
+
+回滚与重新应用：
+
+```powershell
+docker compose run --rm backend alembic downgrade base
+docker compose run --rm backend alembic upgrade head
+```
+
+迁移只创建项目表；`vector` 扩展在 downgrade 时保留，完整清理需管理员显式执行 `DROP EXTENSION vector`。应用启动不会自动执行迁移。详见 [database.md](database.md)。
 
 ## 完整启动与重建持久化测试
 
@@ -230,4 +263,6 @@ docker compose down
 
 ## 当前部署边界
 
-这是本地演示和后续单机云部署的基础方案，不包含 TLS、身份认证、数据库、对象存储、多副本共享存储、GPU、Kubernetes 或自动化发布。后端不向宿主机发布端口、容器以非 root 用户运行并启用 `no-new-privileges`，密钥只通过 `.env` 注入、不写入镜像。具名卷属于当前 Docker 主机；迁移到另一台主机前需要单独备份。云部署阶段还应在外层补充 HTTPS、密钥管理和访问控制。
+这是本地演示和后续单机云部署的基础方案，不包含 TLS、身份认证、对象存储、多副本共享存储、GPU、Kubernetes 或自动化发布。后端不向宿主机发布端口、容器以非 root 用户运行并启用 `no-new-privileges`，密钥只通过 `.env` 注入、不写入镜像。具名卷属于当前 Docker 主机；迁移到另一台主机前需要单独备份。云部署阶段还应在外层补充 HTTPS、密钥管理和访问控制。
+
+数据库服务同样是基础设施边界：默认 `memory` 后端不使用数据库，`db` 不映射宿主机端口、不带密码之外的认证加固、不做备份；`VECTOR_STORE_BACKEND=pgvector` 的接入属于后续 PR。

@@ -27,6 +27,10 @@ RUN groupadd --system --gid 10001 app \
 
 COPY --chown=app:app src ./src
 COPY --chown=app:app data/knowledge.txt ./data/knowledge.txt
+# Database migration files are shipped so operators can run explicit
+# `alembic upgrade head` inside the container; nothing auto-migrates.
+COPY --chown=app:app alembic.ini ./alembic.ini
+COPY --chown=app:app migrations ./migrations
 
 USER app
 
