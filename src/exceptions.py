@@ -69,6 +69,26 @@ class DatasetValidationError(EvaluationError):
     """Raised when the evaluation dataset is malformed or inconsistent."""
 
 
+class AnswerAnnotationValidationError(EvaluationError):
+    """Raised when answer-quality annotations are malformed or inconsistent.
+
+    The error message never contains an absolute filesystem path, only line
+    numbers and dataset-relative identifiers.
+    """
+
+
+class AnswerResponseValidationError(EvaluationError):
+    """Raised when an answer responses file is malformed or inconsistent.
+
+    The error message never contains an absolute filesystem path, only line
+    numbers and dataset-relative identifiers.
+    """
+
+
+class AnswerEvaluationError(EvaluationError):
+    """Raised when the answer-quality evaluation run cannot complete safely."""
+
+
 class ThresholdConfigurationError(EvaluationError):
     """Raised when a threshold sweep or weight configuration is invalid."""
 
