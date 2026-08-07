@@ -87,3 +87,11 @@ class DatabaseConfigurationError(RagError):
 
 class DatabaseConnectionError(RagError):
     """Raised when the database cannot be reached."""
+
+
+class DatabaseSchemaError(RagError):
+    """Raised when the required Alembic schema is unavailable."""
+
+
+class DatabaseOperationError(RagError):
+    """Raised when a database operation cannot complete safely."""

@@ -28,6 +28,9 @@ class KnowledgeIndex:
         with self._lock:
             return len(self._chunks)
 
+    def close(self) -> None:
+        """No-op for the storage protocol; the index owns no resources."""
+
     def search(
         self,
         query_embedding: object,
