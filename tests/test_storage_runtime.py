@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 import src.storage.runtime as runtime_module
-from src.exceptions import DatabaseSchemaError
+from src.exceptions import DatabaseOperationError, DatabaseSchemaError
 from src.knowledge_index import KnowledgeIndex
 from src.storage.runtime import build_memory_runtime, build_pgvector_runtime
 
@@ -78,8 +78,8 @@ class FakeIngestionService:
     def delete_document(self, _document_id: str) -> None:
         raise AssertionError("unused")
 
-    def cleanup_tombstones(self) -> None:
-        runtime_module.__dict__.setdefault("_fake_calls", []).append("cleanup")
+    def reconcile_tombstones(self) -> None:
+        runtime_module.__dict__.setdefault("_fake_calls", []).append("reconcile")
 
     def ensure_builtin_document(self) -> None:
         runtime_module.__dict__.setdefault("_fake_calls", []).append("builtin")
@@ -244,8 +244,10 @@ class TestPgvectorRuntime:
         assert runtime.backend == "pgvector"
         assert "connection" in pgvector_mocks
         assert "schema" in pgvector_mocks
-        assert "cleanup" in pgvector_mocks
+        assert "reconcile" in pgvector_mocks
         assert "builtin" in pgvector_mocks
+        # The reconciliation must run before the built-in document write.
+        assert pgvector_mocks.index("reconcile") < pgvector_mocks.index("builtin")
 
     def test_close_disposes_engine_once(
         self,
@@ -301,6 +303,67 @@ class TestPgvectorRuntime:
         )
 
         with pytest.raises(DatabaseSchemaError):
+            build_pgvector_runtime(
+                embedding_service=FakeEmbeddingService(),
+                database_url="postgresql+psycopg://u:p@h/db",
+                knowledge_path=knowledge_path,
+                upload_dir=tmp_path / "uploads",
+            )
+
+        assert calls == ["dispose"]
+
+    def test_reconcile_database_error_blocks_startup_and_disposes_once(
+        self,
+        tmp_path: Path,
+        knowledge_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A store-level DatabaseOperationError during reconciliation is not
+        swallowed: the runtime build fails and the engine is disposed once."""
+        calls: list[str] = []
+
+        class RecordingEngine:
+            def dispose(self) -> None:
+                calls.append("dispose")
+
+        engine = RecordingEngine()
+        monkeypatch.setattr(
+            runtime_module,
+            "create_database_engine",
+            lambda _url: engine,
+        )
+        monkeypatch.setattr(
+            runtime_module,
+            "check_database_connection",
+            lambda _engine: None,
+        )
+        monkeypatch.setattr(
+            runtime_module,
+            "check_database_schema",
+            lambda _engine, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            runtime_module,
+            "create_session_factory",
+            lambda _engine: SimpleNamespace(),
+        )
+        monkeypatch.setattr(
+            runtime_module,
+            "PgVectorStore",
+            FakeStore,
+        )
+
+        class FailingReconcileService(FakeIngestionService):
+            def reconcile_tombstones(self) -> None:
+                raise DatabaseOperationError("数据库操作失败，请稍后重试")
+
+        monkeypatch.setattr(
+            runtime_module,
+            "PgVectorIngestionService",
+            FailingReconcileService,
+        )
+
+        with pytest.raises(DatabaseOperationError):
             build_pgvector_runtime(
                 embedding_service=FakeEmbeddingService(),
                 database_url="postgresql+psycopg://u:p@h/db",

@@ -54,7 +54,17 @@ PowerShell 单行等价命令：
 docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
 ```
 
-`compose.pgvector.yaml` 只做两件事：把 `VECTOR_STORE_BACKEND` 设为 `pgvector`，并让 backend `depends_on db (condition: service_healthy)`，等待数据库健康后再启动。数据库未就绪或 schema 未迁移时后端进入降级状态：`/health` 返回 `degraded`，存储相关接口返回稳定的 503（详见 [database.md](database.md)）。
+`compose.pgvector.yaml` 只做两件事：把 `VECTOR_STORE_BACKEND` 设为 `pgvector`，并让 backend `depends_on db (condition: service_healthy)`，等待数据库健康后再启动。它**不会覆盖 `DATABASE_URL`**：连接串由基础 `compose.yaml` 从环境变量解析，自定义连接串始终保留。数据库未就绪或 schema 未迁移（含 Alembic 本地配置异常）时后端进入降级状态：`/health` 返回 `degraded`，存储相关接口返回稳定的 503（详见 [database.md](database.md)）。
+
+自定义数据库凭据时，`POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` 与 `DATABASE_URL` 必须保持一致，例如：
+
+```powershell
+$env:POSTGRES_USER="my_user"
+$env:POSTGRES_PASSWORD="my_password"
+$env:POSTGRES_DB="my_db"
+$env:DATABASE_URL="postgresql+psycopg://my_user:my_password@db:5432/my_db"
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
+```
 
 backend 重启方式（保留数据）：
 

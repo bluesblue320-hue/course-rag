@@ -309,11 +309,11 @@ pgvector 模式的行为要点：
 - 上传时只计算**新文档**的 Embedding，不重新切分、不重新编码历史文档
 - 应用重启后直接复用数据库里已保存的 Embedding，不重新计算
 - 原始上传文件仍保存在本地 `data/runtime/uploads/`（volume）
-- 删除文档时数据库行与 Chunk 通过 `ON DELETE CASCADE` 级联删除
+- 删除文档时数据库行与 Chunk 通过 `ON DELETE CASCADE` 级联删除；删除使用**补偿式一致性机制**（内部 tombstone 文件），数据库与文件系统无法构成真正的 ACID 事务，失败时会在下次启动自动恢复或清理
 - `documents.json` 中的数据**不会**被自动迁移；memory 与 pgvector 的数据集彼此独立，切回 memory 即恢复原有 JSON 数据
 - 不创建 HNSW / IVFFlat 等 ANN 索引，不使用 BM25、Redis 或对象存储
 
-`pgvector` 模式启动时会检查数据库可连接、Alembic revision 与本地 head 一致、`vector` 扩展与 `documents` / `chunks` 表存在；**应用启动不会自动执行迁移**。数据库未就绪或 schema 未迁移时，应用仍能启动并响应 `/health`（`status="degraded"`），但 `/search`、`/ask` 与文档管理接口返回稳定的 503，不会泄露连接串或密码。
+`pgvector` 模式启动时会检查数据库可连接、Alembic revision 与本地 head 一致、`vector` 扩展与 `documents` / `chunks` 表存在；本地 Alembic 配置或 migration 目录异常同样会被转换为稳定的 schema 就绪失败。**应用启动不会自动执行迁移**。数据库未就绪或 schema 未迁移时，应用仍能启动并响应 `/health`（`status="degraded"`），但 `/search`、`/ask` 与文档管理接口返回稳定的 503，不会泄露连接串、密码、文件路径或异常堆栈。
 
 启动与迁移流程（详见 [docs/database.md](docs/database.md)）：
 
@@ -328,6 +328,8 @@ docker compose run --rm backend alembic upgrade head
 # 用 pgvector 模式启动 backend 与 frontend
 docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
 ```
+
+`compose.pgvector.yaml` 只负责把 `VECTOR_STORE_BACKEND` 切换为 `pgvector` 并等待数据库健康，**不会覆盖** `DATABASE_URL`：连接串始终由基础 `compose.yaml` 从环境变量解析（默认 `postgresql+psycopg://course_rag:course_rag@db:5432/course_rag`）。如果自定义了 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`，请同步设置 `DATABASE_URL`。
 
 移除数据库并保留具名卷：
 

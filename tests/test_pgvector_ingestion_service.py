@@ -1,6 +1,8 @@
 """Unit tests for PgVectorIngestionService without a real database."""
 
+import logging
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +20,10 @@ from src.exceptions import (
     DocumentParseError,
     UnsupportedDocumentTypeError,
 )
-from src.pgvector_ingestion_service import PgVectorIngestionService
+from src.pgvector_ingestion_service import (
+    PgVectorIngestionService,
+    _parse_tombstone_name,
+)
 
 BUILTIN_ID = "builtin-knowledge"
 
@@ -99,7 +104,7 @@ class FailingLoader:
 
 
 def make_upload_record(
-    document_id: str = "doc-1",
+    document_id: str = "a" * 32,
     stored_filename: str | None = "a" * 32 + ".txt",
     is_builtin: bool = False,
 ) -> DocumentRecord:
@@ -113,6 +118,18 @@ def make_upload_record(
         chunk_count=1,
         created_at=utc_now_iso(),
         is_builtin=is_builtin,
+    )
+
+
+def make_tombstone_name(
+    document_id: str,
+    stored_filename: str,
+    token: str | None = None,
+) -> str:
+    """Return a strict, parseable tombstone filename."""
+    return (
+        f".tombstone-{document_id}-{stored_filename}-"
+        f"{token or 'c' * 32}.tmp"
     )
 
 
@@ -265,30 +282,38 @@ class TestDelete:
     def test_delete_renames_to_tombstone_then_removes(
         self, tmp_path: Path
     ) -> None:
+        document_id = "b" * 32
         stored = "b" * 32 + ".txt"
-        document = make_upload_record(document_id="doc-1", stored_filename=stored)
-        store = FakeStore(documents=[document], chunk_counts={"doc-1": 1})
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
+        store = FakeStore(
+            documents=[document], chunk_counts={document_id: 1}
+        )
         service, upload_dir, _ = make_service(tmp_path, store=store)
         upload_dir.mkdir(parents=True, exist_ok=True)
         (upload_dir / stored).write_bytes(b"original")
 
-        record = service.delete_document("doc-1")
+        record = service.delete_document(document_id)
 
-        assert record.document_id == "doc-1"
-        assert "doc-1" in store.deleted_ids
+        assert record.document_id == document_id
+        assert document_id in store.deleted_ids
         # The original file is gone and no tombstone is left behind.
         assert list(upload_dir.iterdir()) == []
 
     def test_delete_database_failure_restores_file(self, tmp_path: Path) -> None:
+        document_id = "c" * 32
         stored = "c" * 32 + ".txt"
-        document = make_upload_record(document_id="doc-1", stored_filename=stored)
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
         store = FakeStore(documents=[document], fail_delete=True)
         service, upload_dir, _ = make_service(tmp_path, store=store)
         upload_dir.mkdir(parents=True, exist_ok=True)
         (upload_dir / stored).write_bytes(b"original")
 
         with pytest.raises(DatabaseOperationError):
-            service.delete_document("doc-1")
+            service.delete_document(document_id)
 
         # The original file must be restored and the tombstone removed.
         assert (upload_dir / stored).read_bytes() == b"original"
@@ -297,15 +322,18 @@ class TestDelete:
     def test_delete_missing_file_still_deletes_database(
         self, tmp_path: Path
     ) -> None:
+        document_id = "d" * 32
         stored = "d" * 32 + ".txt"
-        document = make_upload_record(document_id="doc-1", stored_filename=stored)
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
         store = FakeStore(documents=[document])
         service, _, _ = make_service(tmp_path, store=store)
 
-        record = service.delete_document("doc-1")
+        record = service.delete_document(document_id)
 
-        assert record.document_id == "doc-1"
-        assert "doc-1" in store.deleted_ids
+        assert record.document_id == document_id
+        assert document_id in store.deleted_ids
 
 
 # ---------------------------------------------------------------------------
@@ -405,28 +433,308 @@ class TestBuiltinInitialization:
 
 
 # ---------------------------------------------------------------------------
-# Tombstone cleanup
+# Tombstone parsing
 # ---------------------------------------------------------------------------
 
 
-class TestTombstoneCleanup:
-    def test_cleanup_removes_leftovers_only(self, tmp_path: Path) -> None:
+class TestTombstoneParsing:
+    def test_tombstone_name_is_parseable(self, tmp_path: Path) -> None:
+        document_id = "a" * 32
+        stored = "b" * 32 + ".txt"
+        name = make_tombstone_name(document_id, stored)
+        path = tmp_path / name
+
+        parsed = _parse_tombstone_name(path)
+
+        assert parsed is not None
+        parsed_document_id, parsed_stored = parsed
+        assert parsed_document_id == document_id
+        assert parsed_stored == stored
+        assert len(name.split("-")[-1].split(".")[0]) == 32  # token exists
+
+    def test_non_matching_name_returns_none(self, tmp_path: Path) -> None:
+        cases = [
+            "tombstone-aaaa.txt.tmp",  # no leading dot
+            ".tombstone-aaaa.tmp",  # not enough segments
+            ".tombstone-AAAAAAAA-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.txt-cccccccccccccccccccccccccccccccc.tmp",  # uppercase hex
+            ".tombstone-aaaa-../../evil.txt-cccccccccccccccccccccccccccccccc.tmp",  # traversal
+            ".tombstone-aaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.exe-cccccccccccccccccccccccccccccccc.tmp",  # bad suffix
+        ]
+        for name in cases:
+            assert _parse_tombstone_name(tmp_path / name) is None, name
+
+
+# ---------------------------------------------------------------------------
+# Tombstone reconciliation at startup
+# ---------------------------------------------------------------------------
+
+
+class TestTombstoneReconcile:
+    def test_malformed_tombstone_is_preserved(
+        self, tmp_path: Path, caplog
+    ) -> None:
         service, upload_dir, _ = make_service(tmp_path)
         upload_dir.mkdir(parents=True, exist_ok=True)
+        malformed = upload_dir / ".tombstone-aaaa.tmp"
+        malformed.write_bytes(b"precious")
+
+        service.reconcile_tombstones()
+
+        assert malformed.is_file()
+        assert malformed.read_bytes() == b"precious"
+        assert "人工检查" in caplog.text
+
+    def test_record_exists_and_file_missing_restores(
+        self, tmp_path: Path
+    ) -> None:
+        document_id = "b" * 32
+        stored = "b" * 32 + ".txt"
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
+        store = FakeStore(documents=[document])
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        tombstone = upload_dir / make_tombstone_name(document_id, stored)
+        tombstone.write_bytes(b"original content")
+
+        service.reconcile_tombstones()
+
+        restored = upload_dir / stored
+        assert restored.is_file()
+        assert restored.read_bytes() == b"original content"
+        assert not tombstone.exists()
+
+    def test_record_exists_and_file_present_removes_duplicate(
+        self, tmp_path: Path
+    ) -> None:
+        document_id = "c" * 32
+        stored = "c" * 32 + ".txt"
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
+        store = FakeStore(documents=[document])
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        (upload_dir / stored).write_bytes(b"existing")
+        tombstone = upload_dir / make_tombstone_name(document_id, stored)
+        tombstone.write_bytes(b"old")
+
+        service.reconcile_tombstones()
+
+        assert (upload_dir / stored).read_bytes() == b"existing"
+        assert not tombstone.exists()
+
+    def test_record_missing_removes_tombstone(self, tmp_path: Path) -> None:
+        service, upload_dir, _ = make_service(tmp_path, store=FakeStore())
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        document_id = "d" * 32
+        stored = "d" * 32 + ".txt"
+        tombstone = upload_dir / make_tombstone_name(document_id, stored)
+        tombstone.write_bytes(b"leftover")
+
+        service.reconcile_tombstones()
+
+        assert not tombstone.exists()
+        assert not (upload_dir / stored).exists()
+
+    def test_stored_filename_mismatch_is_preserved(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        document_id = "e" * 32
+        stored_in_record = "e" * 32 + ".txt"
+        stored_in_tombstone = "f" * 32 + ".md"
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored_in_record
+        )
+        store = FakeStore(documents=[document])
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        tombstone = upload_dir / make_tombstone_name(
+            document_id, stored_in_tombstone
+        )
+        tombstone.write_bytes(b"mismatch")
+
+        service.reconcile_tombstones()
+
+        assert tombstone.is_file()
+        assert not (upload_dir / stored_in_tombstone).exists()
+        assert not (upload_dir / stored_in_record).exists()
+        assert "不一致" in caplog.text
+
+    def test_builtin_record_tombstone_is_preserved(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        document_id = "a" * 32
+        stored = "b" * 32 + ".txt"
+        # A database record flagged as builtin (with a hex document id)
+        # must never trigger a tombstone restore or removal.
+        builtin = make_upload_record(
+            document_id=document_id, stored_filename=stored, is_builtin=True
+        )
+        store = FakeStore(documents=[builtin])
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        tombstone = upload_dir / make_tombstone_name(document_id, stored)
+        tombstone.write_bytes(b"unexpected")
+
+        service.reconcile_tombstones()
+
+        assert tombstone.is_file()
+        assert not (upload_dir / stored).exists()
+        assert "不一致" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Delete compensation semantics
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteCompensation:
+    def test_db_failure_with_immediate_restore_failure_keeps_tombstone(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        document_id = "a" * 32
+        stored = "a" * 32 + ".txt"
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
+        store = FakeStore(documents=[document], fail_delete=True)
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        (upload_dir / stored).write_bytes(b"original")
+
+        real_replace = os.replace
+        replace_calls = []
+
+        def flaky_replace(src, dst):
+            replace_calls.append((Path(src).name, Path(dst).name))
+            if len(replace_calls) == 2:
+                raise OSError("simulated restore failure")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("os.replace", flaky_replace)
+
+        with pytest.raises(DatabaseOperationError):
+            service.delete_document(document_id)
+
+        # The database record still exists, the original file is temporarily
+        # missing, and the tombstone is preserved for the next startup.
+        assert store.get_document(document_id) is not None
+        assert not (upload_dir / stored).exists()
+        tombstones = [
+            path for path in upload_dir.iterdir()
+            if _parse_tombstone_name(path) is not None
+        ]
+        assert len(tombstones) == 1
+        assert tombstones[0].read_bytes() == b"original"
+
+    def test_restart_reconcile_restores_after_failed_restore(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        document_id = "a" * 32
+        stored = "a" * 32 + ".txt"
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
+        store = FakeStore(documents=[document], fail_delete=True)
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        (upload_dir / stored).write_bytes(b"original")
+
+        real_replace = os.replace
+        replace_calls = []
+
+        def flaky_replace(src, dst):
+            replace_calls.append(Path(src).name)
+            if len(replace_calls) == 2:
+                raise OSError("simulated restore failure")
+            return real_replace(src, dst)
+
+        monkeypatch.setattr("os.replace", flaky_replace)
+
+        with pytest.raises(DatabaseOperationError):
+            service.delete_document(document_id)
+
+        # Simulate an application restart: the same database record exists.
+        store.fail_delete = False
+        service.reconcile_tombstones()
+
+        assert (upload_dir / stored).read_bytes() == b"original"
+        assert store.get_document(document_id) is not None
+        tombstones = [
+            path for path in upload_dir.iterdir()
+            if _parse_tombstone_name(path) is not None
+        ]
+        assert tombstones == []
+
+    def test_db_success_but_unlink_failure_keeps_tombstone(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        document_id = "a" * 32
+        stored = "a" * 32 + ".txt"
+        document = make_upload_record(
+            document_id=document_id, stored_filename=stored
+        )
+        store = FakeStore(documents=[document])
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        (upload_dir / stored).write_bytes(b"original")
+
+        original_unlink = Path.unlink
+        unlink_calls = []
+
+        def flaky_unlink(self, *args, **kwargs):
+            if ".tombstone-" in self.name and not unlink_calls:
+                unlink_calls.append(self.name)
+                raise OSError("simulated unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+        # The API deletion still succeeds even though the tombstone removal
+        # failed; the leftover is cleaned up by the next startup.
+        record = service.delete_document(document_id)
+
+        assert record.document_id == document_id
+        assert document_id in store.deleted_ids
+        tombstones = [
+            path for path in upload_dir.iterdir()
+            if _parse_tombstone_name(path) is not None
+        ]
+        assert len(tombstones) == 1
+
+        # Next startup: the database record is gone, so the tombstone is
+        # removed and no original file is created.
+        service.reconcile_tombstones()
+        assert list(upload_dir.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Recovery log privacy
+# ---------------------------------------------------------------------------
+
+
+class TestRecoveryLogPrivacy:
+    def test_logs_do_not_leak_paths_or_identifiers(
+        self, tmp_path: Path, caplog
+    ) -> None:
+        service, upload_dir, _ = make_service(tmp_path)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        document_id = "a" * 32
+        stored = "b" * 32 + ".txt"
+        # A malformed tombstone logs a fixed warning.
         (upload_dir / ".tombstone-aaaa.tmp").write_bytes(b"x")
-        (upload_dir / ".tombstone-bbbb.tmp").write_bytes(b"y")
-        (upload_dir / ("i" * 32 + ".txt")).write_bytes(b"keep")
+        # A database-mismatch tombstone logs a fixed warning.
+        store = FakeStore()
+        service._store = store
+        mismatch = upload_dir / make_tombstone_name(document_id, stored)
+        mismatch.write_bytes(b"y")
 
-        service.cleanup_tombstones()
+        with caplog.at_level(logging.WARNING):
+            service.reconcile_tombstones()
 
-        assert not (upload_dir / ".tombstone-aaaa.tmp").exists()
-        assert not (upload_dir / ".tombstone-bbbb.tmp").exists()
-        assert len(list(upload_dir.iterdir())) == 1
-
-    def test_cleanup_failure_does_not_raise(self, tmp_path: Path) -> None:
-        service, upload_dir, _ = make_service(tmp_path)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        # A directory with a tombstone name cannot be unlinked -> OSError.
-        (upload_dir / ".tombstone-dir.tmp").mkdir()
-
-        service.cleanup_tombstones()  # must not raise
+        assert str(tmp_path) not in caplog.text
+        assert stored not in caplog.text
+        assert document_id not in caplog.text
+        assert "Traceback" not in caplog.text

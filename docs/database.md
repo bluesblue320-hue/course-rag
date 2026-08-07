@@ -82,10 +82,10 @@ pgvector 模式启动时的初始化顺序：
 3. 检查数据库可连接（`SELECT 1`）
 4. 检查 schema 就绪（Alembic revision、`vector` 扩展、`documents` / `chunks` 表）
 5. 创建 `PgVectorStore` 与 `PgVectorIngestionService`
-6. 初始化内置文档 `builtin-knowledge`（首次写入，重启复用）
-7. 清理遗留 tombstone 文件（best-effort）
+6. reconcile 遗留 tombstone（按数据库状态恢复或清理，见第 7 节）
+7. 初始化内置文档 `builtin-knowledge`（首次写入，重启复用）
 
-**应用启动不会自动执行 Alembic 迁移**；schema 变更始终是显式运维动作。
+**应用启动不会自动执行 Alembic 迁移**；schema 变更始终是显式运维动作。本地 Alembic 配置问题（migration 目录缺失、配置损坏、多个 head）与数据库 revision 不匹配一样，都会转换为稳定的 `DatabaseSchemaError`，应用进入降级状态而不是启动失败。
 
 ## 5. 迁移命令
 
@@ -114,10 +114,36 @@ docker compose run --rm backend alembic upgrade head
 `compose.pgvector.yaml` 是 pgvector 模式的 Compose override：
 
 - 把 `VECTOR_STORE_BACKEND` 设为 `pgvector`
-- 设置 `DATABASE_URL` 指向 Compose 网络内的 `db:5432`
 - 给 backend 增加 `depends_on: db (condition: service_healthy)`，等待数据库就绪
+- **不设置 `DATABASE_URL`**：连接串始终由基础 `compose.yaml` 从环境变量解析（默认 `postgresql+psycopg://course_rag:course_rag@db:5432/course_rag`），因此自定义连接串永远不会被 override 覆盖
+
+如果自定义了 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`，必须同步设置 `DATABASE_URL`，例如：
+
+```powershell
+$env:POSTGRES_USER="my_user"
+$env:POSTGRES_PASSWORD="my_password"
+$env:POSTGRES_DB="my_db"
+$env:DATABASE_URL="postgresql+psycopg://my_user:my_password@db:5432/my_db"
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
+```
 
 基础 `compose.yaml` 保持 `VECTOR_STORE_BACKEND` 默认 `memory`，backend **不**依赖 `db` 服务，memory 模式启动时不需要数据库。
+
+## 7. tombstone 补偿机制
+
+pgvector 模式删除文档时，本地原文件与数据库无法构成真正的 ACID 事务，因此使用**补偿式一致性机制**（内部 tombstone 文件）：
+
+1. 删除前把原文件原子重命名为可解析的 tombstone（文件名携带文档 ID 与存储文件名）
+2. 执行数据库删除事务（Chunk 通过 `ON DELETE CASCADE` 级联删除）
+3. 数据库提交成功后删除 tombstone
+
+失败补偿：
+
+- 数据库删除失败 → 立即把 tombstone 恢复为原文件；若即时恢复也失败，tombstone 被保留，数据库记录仍在，**下次启动时按数据库状态自动恢复**
+- 数据库删除成功但 tombstone 删除失败 → 删除仍视为成功，遗留 tombstone 在下次启动时（此时数据库记录已不存在）被自动清理
+- 无法识别的 tombstone 或与数据库记录不一致的 tombstone：**不会被无条件删除**，保留供人工检查，只记录固定警告，不输出文件路径或异常堆栈
+
+tombstone 是内部实现细节，不属于公共 API。
 
 ## 7. 数据库不可用时的行为（降级）
 
@@ -147,7 +173,7 @@ DELETE /documents/{id} → 503 STORAGE_*
 | `DatabaseSchemaError` | 503 | `STORAGE_SCHEMA_NOT_READY` | 数据库结构尚未准备完成 |
 | `DatabaseOperationError` | 503 | `STORAGE_UNAVAILABLE` | 存储服务暂时不可用 |
 
-响应绝不会包含 `DATABASE_URL`、用户名、密码、主机名、SQL 或驱动错误文本。memory 模式的数据库故障不影响应用。
+响应绝不会包含 `DATABASE_URL`、用户名、密码、主机名、SQL、驱动错误文本、本地文件路径或异常堆栈。memory 模式的数据库故障不影响应用。schema 检查失败（含 Alembic 本地配置异常）时应用进入降级状态而不是启动失败。
 
 ## 8. 查看数据
 

@@ -454,6 +454,23 @@ class TestPgvectorDegraded:
                 "code": "STORAGE_SCHEMA_NOT_READY",
                 "message": "数据库结构尚未准备完成",
             }
+            # The HTTP response must never expose local paths or Alembic
+            # internals from the underlying schema failure.
+            assert "migrations" not in documents.text
+            assert "Traceback" not in documents.text
+            assert "CommandError" not in documents.text
+
+            search = client.post("/search", json={"query": "课程问题"})
+            assert search.status_code == 503
+            ask = client.post("/ask", json={"question": "课程问题"})
+            assert ask.status_code == 503
+            upload = client.post(
+                "/documents",
+                files={"file": ("notes.txt", b"data", "text/plain")},
+            )
+            assert upload.status_code == 503
+            delete = client.delete("/documents/whatever")
+            assert delete.status_code == 503
 
     def test_degraded_mode_keeps_health_available(
         self,
