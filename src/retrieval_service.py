@@ -216,7 +216,14 @@ class RetrievalService:
         if self._reranker is not None:
             candidates = [
                 RerankInput(
-                    candidate_id=str(r["chunk_index"]),
+                    # Internal-only unique id: chunk_index alone collides when
+                    # two documents both own chunk_index=0.  Never exposed in
+                    # API responses.
+                    candidate_id=_candidate_id(
+                        str(r["document_id"]),
+                        int(r["chunk_index"]),
+                        int(r["rank"]),
+                    ),
                     text=str(r["text"]),
                 )
                 for r in raw_results
@@ -235,7 +242,11 @@ class RetrievalService:
         # Build final ordered list
         chunks_with_scores: list[tuple[dict[str, object], float | None]] = []
         for raw in raw_results:
-            cid = str(raw["chunk_index"])
+            cid = _candidate_id(
+                str(raw["document_id"]),
+                int(raw["chunk_index"]),
+                int(raw["rank"]),
+            )
             rscore = rerank_scores.get(cid) if reranker_applied else None
             chunks_with_scores.append((raw, rscore))
 
@@ -279,6 +290,21 @@ class RetrievalService:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _candidate_id(
+    document_id: str,
+    chunk_index: int,
+    retrieval_rank: int,
+) -> str:
+    """Build a collision-free internal reranker candidate id.
+
+    The id is only used to map rerank scores back to raw retrieval results
+    and is never exposed in API responses.  It combines the document id,
+    the chunk index, and the retrieval rank so two different documents that
+    both own ``chunk_index=0`` can never collide.
+    """
+    return f"{document_id}:{chunk_index}:{retrieval_rank}"
 
 
 def _extract_score(raw: dict[str, object]) -> float:

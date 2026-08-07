@@ -1,0 +1,20 @@
+# pgvector runtime override for the course-rag backend.
+#
+# Usage (from the repository root):
+#
+#   docker compose up -d db
+#   docker compose build backend
+#   docker compose run --rm backend alembic upgrade head
+#   docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
+#
+# The base compose file keeps VECTOR_STORE_BACKEND defaulting to memory, so
+# this override is what switches the backend to PostgreSQL + pgvector.
+# Migrations are never applied automatically by the application.
+services:
+  backend:
+    environment:
+      VECTOR_STORE_BACKEND: pgvector
+      DATABASE_URL: postgresql+psycopg://course_rag:course_rag@db:5432/course_rag
+    depends_on:
+      db:
+        condition: service_healthy
