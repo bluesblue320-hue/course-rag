@@ -291,11 +291,19 @@ def _run_offline(args: argparse.Namespace, root: Path) -> int:
     responses_path = _resolve_path(args.responses, root)
     output_dir = _resolve_path(args.output_dir, root)
 
+    # Display paths are computed once and reused: reports must never contain
+    # absolute local paths, only repository-relative paths or bare filenames.
+    dataset_display = _display_path(dataset_path, root)
+    annotations_display = _display_path(annotations_path, root)
+    responses_display = _display_path(responses_path, root)
+
+    # Each input is loaded exactly once; the same parsed values feed the
+    # runner so exit-code classification never re-reads the files.
     try:
-        cases = load_dataset(dataset_path)
-        annotations = load_answer_annotations(annotations_path, cases)
         from src.evaluation.answer_responses import load_answer_responses
 
+        cases = load_dataset(dataset_path)
+        annotations = load_answer_annotations(annotations_path, cases)
         responses = load_answer_responses(responses_path, cases)
     except AnswerAnnotationValidationError as exc:
         print(f"标注无效: {exc}", file=sys.stderr)
@@ -309,9 +317,12 @@ def _run_offline(args: argparse.Namespace, root: Path) -> int:
 
     try:
         run = evaluate_answers_offline(
-            dataset_path=dataset_path,
-            annotations_path=annotations_path,
-            responses_path=responses_path,
+            cases=cases,
+            annotations=annotations,
+            responses=responses,
+            dataset_path=dataset_display,
+            annotations_path=annotations_display,
+            responses_path=responses_display,
             output_dir=output_dir,
             run_name=args.run_name or "offline",
             model_label=args.model_label,

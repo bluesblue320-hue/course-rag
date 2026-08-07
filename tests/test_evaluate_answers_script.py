@@ -263,3 +263,151 @@ def test_offline_never_leaks_absolute_path(
     assert exit_code == EXIT_OK
     stdout = capsys.readouterr().out
     assert str(tmp_path) not in stdout
+
+
+def _copy_fixture_inputs(tmp_path: Path) -> Path:
+    """Copy the fixture inputs under a secret-named folder."""
+    secret_dir = tmp_path / "secret-user-folder"
+    secret_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("dataset.jsonl", "annotations.jsonl", "responses.jsonl"):
+        content = (FIXTURE_ROOT / filename).read_text(encoding="utf-8")
+        (secret_dir / filename).write_text(content, encoding="utf-8")
+    return secret_dir
+
+
+def test_offline_report_never_leaks_tmp_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    secret_dir = _copy_fixture_inputs(tmp_path)
+    output_dir = tmp_path / "out"
+    exit_code = main(
+        [
+            "--dataset",
+            str(secret_dir / "dataset.jsonl"),
+            "--annotations",
+            str(secret_dir / "annotations.jsonl"),
+            "--responses",
+            str(secret_dir / "responses.jsonl"),
+            "--output-dir",
+            str(output_dir),
+            "--run-name",
+            "path-leak-test",
+        ],
+        embedding_factory=_NeverFactory(),
+        generation_factory=_NeverFactory(),
+    )
+    assert exit_code == EXIT_OK
+
+    summary = json.loads(
+        (output_dir / "summary.json").read_text(encoding="utf-8")
+    )
+    config = summary["run_configuration"]
+    assert config["responses_path"] is not None
+    assert config["responses_path"] == "responses.jsonl"
+    assert config["dataset_path"] == "dataset.jsonl"
+    assert config["annotations_path"] == "annotations.jsonl"
+
+    serialized = json.dumps(summary, ensure_ascii=False)
+    assert str(tmp_path) not in serialized
+    assert str(secret_dir) not in serialized
+
+    report = (output_dir / "report.md").read_text(encoding="utf-8")
+    assert str(tmp_path) not in report
+    assert str(secret_dir) not in report
+
+    cases = (output_dir / "cases.jsonl").read_text(encoding="utf-8")
+    assert str(tmp_path) not in cases
+
+    stdout = capsys.readouterr().out
+    assert str(tmp_path) not in stdout
+    assert str(secret_dir) not in stdout
+
+
+def test_offline_repo_relative_paths_are_recorded(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Repo-internal inputs keep their full repository-relative paths."""
+    output_dir = tmp_path / "out"
+    exit_code = main(
+        [
+            "--dataset",
+            str(FIXTURE_ROOT / "dataset.jsonl"),
+            "--annotations",
+            str(FIXTURE_ROOT / "annotations.jsonl"),
+            "--responses",
+            str(FIXTURE_ROOT / "responses.jsonl"),
+            "--output-dir",
+            str(output_dir),
+            "--run-name",
+            "relative-path-test",
+        ],
+        embedding_factory=_NeverFactory(),
+        generation_factory=_NeverFactory(),
+    )
+    assert exit_code == EXIT_OK
+    summary = json.loads(
+        (output_dir / "summary.json").read_text(encoding="utf-8")
+    )
+    config = summary["run_configuration"]
+    assert config["responses_path"] is not None
+    assert config["dataset_path"] == (
+        "tests/fixtures/answer_evaluation/dataset.jsonl"
+    )
+    assert config["annotations_path"] == (
+        "tests/fixtures/answer_evaluation/annotations.jsonl"
+    )
+    assert config["responses_path"] == (
+        "tests/fixtures/answer_evaluation/responses.jsonl"
+    )
+
+
+def test_offline_inputs_are_loaded_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The offline CLI must not re-read dataset / annotations / responses."""
+    import scripts.evaluate_answers as module
+
+    call_counts: dict[str, int] = {"dataset": 0, "annotations": 0, "responses": 0}
+
+    real_load_dataset = module.load_dataset
+    real_load_annotations = module.load_answer_annotations
+    from src.evaluation.answer_responses import load_answer_responses as real_load_responses
+
+    def counting_load_dataset(path, *args, **kwargs):
+        call_counts["dataset"] += 1
+        return real_load_dataset(path, *args, **kwargs)
+
+    def counting_load_annotations(path, *args, **kwargs):
+        call_counts["annotations"] += 1
+        return real_load_annotations(path, *args, **kwargs)
+
+    def counting_load_responses(path, *args, **kwargs):
+        call_counts["responses"] += 1
+        return real_load_responses(path, *args, **kwargs)
+
+    monkeypatch.setattr(module, "load_dataset", counting_load_dataset)
+    monkeypatch.setattr(module, "load_answer_annotations", counting_load_annotations)
+    monkeypatch.setattr(
+        "src.evaluation.answer_responses.load_answer_responses",
+        counting_load_responses,
+    )
+
+    output_dir = tmp_path / "out"
+    exit_code = main(
+        [
+            "--dataset",
+            str(FIXTURE_ROOT / "dataset.jsonl"),
+            "--annotations",
+            str(FIXTURE_ROOT / "annotations.jsonl"),
+            "--responses",
+            str(FIXTURE_ROOT / "responses.jsonl"),
+            "--output-dir",
+            str(output_dir),
+            "--run-name",
+            "single-load-test",
+        ],
+        embedding_factory=_NeverFactory(),
+        generation_factory=_NeverFactory(),
+    )
+    assert exit_code == EXIT_OK
+    assert call_counts == {"dataset": 1, "annotations": 1, "responses": 1}

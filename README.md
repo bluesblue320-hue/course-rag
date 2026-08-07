@@ -419,6 +419,13 @@ python -m scripts.evaluate_answers --live `
 
 CI 只使用 `tests/fixtures/answer_evaluation/` 的确定性 Fixture 运行离线 smoke test，
 **不会**调用真实 LLM、不会下载 Embedding 模型、不会加载真实 Reranker。
+
+回答评估的解析规则要点：严格引用格式只有 `[来源N]`；普通 Markdown 方括号（如
+`[FastAPI]`、`[Python]`、`[1]`）不是引用，不会被当作 malformed citation；引用标记不参与
+标注事实与矛盾短语的匹配；`sources` 的 rank 必须从 1 开始连续；启用 Reranker 时
+`max_relevance_score`（拒答依据）允许高于最终返回来源的最高检索分数；离线报告只记录
+仓库相对路径或文件名，不包含本地绝对路径。
+
 指标定义、标注 Schema、strict_pass 规则与限制详见 [`docs/answer-evaluation.md`](docs/answer-evaluation.md)。
 
 ## 可选 Reranker

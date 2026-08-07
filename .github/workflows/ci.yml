@@ -130,6 +130,18 @@ jobs:
           assert summary["evaluation_type"] == "answer_quality"
           assert summary["dataset_counts"]["total"] > 0
 
+          # Offline runs must record every input path as a safe
+          # repository-relative path (or bare filename), never as an
+          # absolute path and never as null.
+          config = summary["run_configuration"]
+          assert config["responses_path"] is not None
+          assert not config["dataset_path"].startswith("/")
+          assert not config["annotations_path"].startswith("/")
+          assert not config["responses_path"].startswith("/")
+          assert ":\\" not in config["dataset_path"]
+          assert ":\\" not in config["annotations_path"]
+          assert ":\\" not in config["responses_path"]
+
           case_lines = [
               line
               for line in (root / "cases.jsonl")

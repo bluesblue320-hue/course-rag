@@ -29,6 +29,7 @@ def _build_run(tmp_path: Path):
         responses=responses,
         dataset_path="tests/fixtures/answer_evaluation/dataset.jsonl",
         annotations_path="tests/fixtures/answer_evaluation/annotations.jsonl",
+        responses_path="tests/fixtures/answer_evaluation/responses.jsonl",
         run_name="local-fixture",
         model_label="deterministic-fixture",
     )

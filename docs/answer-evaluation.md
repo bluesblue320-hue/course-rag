@@ -148,11 +148,33 @@ tests/fixtures/answer_evaluation/  独立的确定性测试 Fixture
 
 - `case_id` 必须存在于 dataset，不得重复；response case ids 必须与 annotations 完全一致。
 - `answer_status` 仅允许 `answered` / `insufficient_context`。
-- `sources[].rank` 从 1 开始、唯一、升序；`score` 为 `[-1, 1]` 有限数字；`text` / `document_id` 非空；
+- `sources[].rank` 必须从 1 开始**连续递增**（1..N，与数组位置完全一致）；
+  `score` 为 `[-1, 1]` 有限数字；`text` / `document_id` 非空；
   `page_number` 为正整数或 null；`chunk_index` 非负整数。
-- `max_relevance_score`：有 sources 时与最高检索分数一致；无 sources 时允许 null；不允许 NaN/Infinity。
+- `max_relevance_score`：无 reranker 时必须与最终返回来源的最高检索分数一致；
+  启用 Reranker 时允许高于最终来源的最高分（见下文"Reranker 与 max_relevance_score"）；
+  无 sources 时允许 null；不允许 NaN/Infinity。
 - `relevance_threshold` 为 `[0, 1]` 有限数字。
 - 耗时字段非负有限；布尔字段必须是真正的 bool（不接受 0/1）。
+
+### sources rank 连续性
+
+`[来源N]` 的编号直接映射到 `sources[N-1]`，因此 rank 必须与数组位置完全一致：
+`1, 2, 3, ..., N`。`[1, 3]`、`[1, 2, 4]`、`[2, 3]`、`[1, 1]` 都会被拒绝，否则引用编号
+会与实际来源错位。
+
+### Reranker 与 max_relevance_score
+
+生产 RetrievalService 中 `max_relevance_score` 是**向量候选池**中的最高 retrieval score，
+它是拒答决策的依据，Reranker 不会改变它。Reranker 重排后返回的 final Top-K 可能不包含
+该最高分来源（高分候选被排到 K 名之后）。
+
+因此：
+
+- `reranker_applied=false`（含 fallback 保持原向量顺序）：final Top-K 包含最高向量候选，
+  `max_relevance_score` 必须与最终来源最高分一致（允许 `1e-9` 容差）。
+- `reranker_applied=true`：`max_relevance_score` 允许高于最终来源最高分（候选池最高分
+  可能被重排移出 Top-K），但**不得低于**任何最终返回来源的检索分数。
 
 ---
 
@@ -163,10 +185,14 @@ tests/fixtures/answer_evaluation/  独立的确定性测试 Fixture
 - 合法：`[来源1]`、`[来源2]`、`[来源12]`，支持连续 `[来源1][来源2]`。
 - 正则：`r"\[来源([1-9]\d*)\]"`。
 - 格式错误（记为 malformed）：`[来源0]`、`[来源01]`、`[来源]`、`[来源A]`、`[source1]`、
-  `【来源1】`、`[来源 1]`、`[来源1, 来源2]`。
+  `[SOURCE1]`、`【来源1】`、`[来源 1]`、`[来源1, 来源2]`。
+
+**普通 Markdown 方括号不是引用**。`[FastAPI]`、`[Python]`、`[Service]`、`[1]`、`[abc]`
+是普通文本，**不会被**当作 malformed citation。只有以 `来源` / `source`（不区分大小写）
+开头、形似引用的片段才会进入 malformed 检查。
 
 重复引用允许，分别统计 occurrence 与 unique source。解析器不修改原始答案，
-不把引用文本计入事实短语匹配，也不把完整答案写入异常消息。
+也不把完整答案写入异常消息。
 
 **来源编号合法性**：引用编号 1-based，对应 response `sources` 顺序。合法条件
 `1 <= source_number <= len(sources)`。越界（如 `[来源4]` 但只有 3 条 sources）记为
@@ -182,10 +208,16 @@ tests/fixtures/answer_evaluation/  独立的确定性测试 Fixture
 移除 CJK 相邻空白、统一常见全角标点）。禁止模糊语义匹配、编辑距离、Embedding 相似度、
 LLM 判断、同义词扩展、中文分词。
 
-一个 fact 被覆盖，**当且仅当**任一 `accepted_phrase` 经相同规范化后是最终答案规范化文本的
-子串。这是 lexical annotated fact coverage，不是完整语义正确性。
+**引用标记不参与事实匹配**。事实覆盖与矛盾短语检测使用去除全部 source-like citation
+markup（`[来源N]` 及所有 malformed 形似片段）后的答案副本，以中性分隔符替换而不是直接
+删除，避免 `"Service[来源1]层"` 被拼接成 `"Service层"` 造成人为匹配。普通 Markdown 方括号
+（如 `[Python]`）保留原样。引用数量、编号、malformed 统计与原始答案输出不受影响。
+
+一个 fact 被覆盖，**当且仅当**任一 `accepted_phrase` 经相同规范化后是（去除引用标记的）
+答案规范化文本的子串。这是 lexical annotated fact coverage，不是完整语义正确性。
 
 ### 来源支持（supported fact citation coverage）
+
 
 对于每个被覆盖的 fact：
 
@@ -334,6 +366,11 @@ HTTP Header、完整 Provider 响应、traceback）。
 所有报告：`allow_nan=False`、数值稳定舍入、key 顺序稳定、无绝对路径、无时间戳、
 无 API Key、无 Authorization、无 Provider 原始错误、无完整 Prompt。
 `reports/generated/` 继续不进入 Git；不自动提交 live 输出。
+
+**路径安全**：离线模式的 `run_configuration` 记录 `dataset_path`、`annotations_path`、
+`responses_path` 三个字段（`responses_path` 记录实际评分的输入文件，不为 null）。
+路径只以仓库相对路径（文件位于仓库内时，如 `tests/fixtures/answer_evaluation/dataset.jsonl`）
+或裸文件名（文件位于仓库外时，如 `responses.jsonl`）记录，**绝不包含本地绝对路径**。
 
 ---
 

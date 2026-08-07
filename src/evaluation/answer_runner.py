@@ -170,11 +170,17 @@ def run_offline_answer_evaluation(
     responses: tuple[AnswerResponse, ...],
     dataset_path: str,
     annotations_path: str,
+    responses_path: str,
     run_name: str,
     model_label: str | None = None,
     prompt_version: str | None = None,
 ) -> AnswerEvaluationRun:
-    """Score existing responses with zero model, database, or network use."""
+    """Score existing responses with zero model, database, or network use.
+
+    All three path arguments must already be safe display values
+    (repository-relative paths or bare filenames); they are written to the
+    report verbatim.
+    """
     if len(cases) != len(annotations) or len(cases) != len(responses):
         raise AnswerEvaluationError("数据集、标注与回答结果的数量必须一致")
 
@@ -189,7 +195,7 @@ def run_offline_answer_evaluation(
         relevance_threshold=None,
         dataset_path=dataset_path,
         annotations_path=annotations_path,
-        responses_path=None,
+        responses_path=responses_path,
         reranker_applied_any=reranker_applied_any,
         reranker_fallback_any=reranker_fallback_any,
     )
@@ -330,27 +336,31 @@ def write_responses_jsonl(
 
 def evaluate_answers_offline(
     *,
-    dataset_path: Path,
-    annotations_path: Path,
-    responses_path: Path,
+    cases: tuple[EvaluationCase, ...],
+    annotations: tuple[AnswerAnnotation, ...],
+    responses: tuple[AnswerResponse, ...],
+    dataset_path: str,
+    annotations_path: str,
+    responses_path: str,
     output_dir: Path,
     run_name: str,
     model_label: str | None,
     prompt_version: str | None,
 ) -> AnswerEvaluationRun:
-    """Load inputs, score responses, and write reports in one call."""
-    from src.evaluation.dataset import load_dataset
+    """Score already-loaded inputs and write reports in one call.
 
-    cases = load_dataset(dataset_path)
-    annotations = load_answer_annotations(annotations_path, cases)
-    responses = load_answer_responses(responses_path, cases)
-
+    The three path arguments must be safe display values (repository-relative
+    paths or bare filenames) so reports never leak absolute local paths.
+    Inputs are passed in already parsed to keep the CLI from loading them
+    twice.
+    """
     run = run_offline_answer_evaluation(
         cases=cases,
         annotations=annotations,
         responses=responses,
-        dataset_path=dataset_path.as_posix(),
-        annotations_path=annotations_path.as_posix(),
+        dataset_path=dataset_path,
+        annotations_path=annotations_path,
+        responses_path=responses_path,
         run_name=run_name,
         model_label=model_label,
         prompt_version=prompt_version,

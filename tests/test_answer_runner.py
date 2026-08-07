@@ -65,12 +65,16 @@ class TestOfflineRunner:
             responses=responses,
             dataset_path="tests/fixtures/answer_evaluation/dataset.jsonl",
             annotations_path="tests/fixtures/answer_evaluation/annotations.jsonl",
+            responses_path="tests/fixtures/answer_evaluation/responses.jsonl",
             run_name="local-fixture",
             model_label="deterministic-fixture",
         )
         assert run.configuration.mode == "offline"
         assert run.configuration.embedding_model is None
         assert run.configuration.top_k is None
+        assert run.configuration.responses_path == (
+            "tests/fixtures/answer_evaluation/responses.jsonl"
+        )
         assert run.aggregate_metrics.case_count == 8
         assert len(run.case_metrics) == 8
 
@@ -83,6 +87,7 @@ class TestOfflineRunner:
                 responses=(),
                 dataset_path="d",
                 annotations_path="a",
+                responses_path="r",
                 run_name="x",
             )
 
@@ -94,6 +99,7 @@ class TestOfflineRunner:
             responses=responses,
             dataset_path="d",
             annotations_path="a",
+            responses_path="r",
             run_name="x",
         )
         path = write_responses_jsonl(run.responses, tmp_path / "out")
