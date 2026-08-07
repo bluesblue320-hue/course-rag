@@ -16,6 +16,7 @@ operation goes through the injected store.
 
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -53,11 +54,37 @@ logger = logging.getLogger(__name__)
 #: Document id reserved for the built-in knowledge document in both backends.
 BUILTIN_DOCUMENT_ID = "builtin-knowledge"
 
+#: Uploaded document ids are always ``uuid4().hex`` (32 lowercase hex digits).
+_DOCUMENT_ID_RE = re.compile(r"[0-9a-f]{32}")
+
 #: Tombstones are hidden files that can never collide with the strict
 #: ``<32 hex>.<suffix>`` stored-filename format and are never picked up by
 #: the document loaders (which only accept .txt/.md/.pdf suffixes).
+#: Every tombstone carries enough identity metadata to be reconciled against
+#: the database at startup:
+#: ``.tombstone-{document_id}-{stored_filename}-{token}.tmp``.
 _TOMBSTONE_PREFIX = ".tombstone-"
 _TOMBSTONE_SUFFIX = ".tmp"
+_TOMBSTONE_RE = re.compile(
+    r"\.tombstone-"
+    r"(?P<document_id>[0-9a-f]{32})-"
+    r"(?P<stored_filename>[0-9a-f]{32}\.(?:txt|md|pdf))-"
+    r"(?P<token>[0-9a-f]{32})"
+    r"\.tmp"
+)
+
+
+def _parse_tombstone_name(path: Path) -> tuple[str, str] | None:
+    """Parse a strict tombstone filename into ``(document_id, stored_filename)``.
+
+    Returns ``None`` when the name does not match the strict format.  The
+    caller must never guess about such files, must never log the raw name,
+    and must never log the original exception.
+    """
+    match = _TOMBSTONE_RE.fullmatch(path.name)
+    if match is None:
+        return None
+    return match.group("document_id"), match.group("stored_filename")
 
 
 class PgVectorIngestionService:
@@ -112,23 +139,82 @@ class PgVectorIngestionService:
     # Startup: tombstones and the built-in document
     # ------------------------------------------------------------------
 
-    def cleanup_tombstones(self) -> None:
-        """Best-effort removal of leftover tombstone files.
+    def reconcile_tombstones(self) -> None:
+        """Reconcile leftover tombstones against the current database state.
 
-        Called at startup so a previous deletion that failed on the final
-        unlink can be finished.  Failures are logged and never block startup.
+        Called at startup.  For every parseable tombstone:
+
+        * when the database record still exists and the original file is
+          missing, the tombstone is restored to the original filename;
+        * when the database record still exists and the original file is
+          already present, the tombstone is a duplicate and is removed;
+        * when the database record no longer exists, the deletion already
+          committed and the leftover tombstone is removed;
+        * malformed or inconsistent tombstones are kept for manual
+          inspection.
+
+        Failures are logged with fixed messages (never with file paths or
+        exception traces) and never block application startup.
         """
         if not self._upload_dir.is_dir():
             return
-        for candidate in self._upload_dir.iterdir():
-            if self._is_tombstone(candidate):
+        for candidate in sorted(
+            self._upload_dir.iterdir(),
+            key=lambda path: path.name,
+        ):
+            parsed = _parse_tombstone_name(candidate)
+            if parsed is None:
+                logger.warning(
+                    "发现无法安全识别的tombstone，已保留供人工检查"
+                )
+                continue
+            document_id, stored_filename = parsed
+            try:
+                record = self._store.get_document(document_id)
+            except DatabaseOperationError:
+                logger.warning(
+                    "暂时无法核对tombstone对应的数据库记录，将在下次启动重试"
+                )
+                continue
+            if record is None:
+                self._remove_tombstone(candidate)
+                continue
+            if record.is_builtin or record.stored_filename != stored_filename:
+                logger.warning(
+                    "tombstone与数据库记录不一致，已保留供人工检查"
+                )
+                continue
+            try:
+                target_path = self._resolve_stored_path(stored_filename)
+            except DocumentMetadataError:
+                logger.warning(
+                    "tombstone与数据库记录不一致，已保留供人工检查"
+                )
+                continue
+            if target_path.exists():
+                # The database record and the original file are both intact;
+                # this tombstone is a duplicate leftover of a completed delete.
+                self._remove_tombstone(candidate)
+            else:
                 try:
-                    candidate.unlink()
+                    os.replace(candidate, target_path)
                 except OSError:
                     logger.warning(
-                        "清理遗留 tombstone 失败，等待下次启动重试",
-                        exc_info=True,
+                        "数据库删除失败后暂时无法恢复原文件，将在下次启动重试"
                     )
+
+    def _remove_tombstone(self, tombstone: Path) -> None:
+        """Best-effort removal of one tombstone; failures are logged only."""
+        try:
+            tombstone.unlink()
+        except OSError:
+            logger.warning(
+                "暂时无法清理已完成删除的tombstone，将在下次启动重试"
+            )
+
+    def cleanup_tombstones(self) -> None:
+        """Deprecated compatibility alias for :meth:`reconcile_tombstones`."""
+        self.reconcile_tombstones()
 
     def ensure_builtin_document(self) -> None:
         """Write the built-in knowledge document once and reuse it on restarts.
@@ -255,9 +341,11 @@ class PgVectorIngestionService:
         """Delete one uploaded document and its stored chunks.
 
         The local file and the database cannot form one true transaction, so
-        the original file is first renamed to an invisible tombstone, the
+        the original file is first renamed to a parseable tombstone, the
         database transaction runs, and only after it commits is the tombstone
-        removed.  A failed database transaction restores the original file.
+        removed.  A failed database transaction restores the original file;
+        when that immediate restore fails the tombstone is kept and
+        :meth:`reconcile_tombstones` restores it on the next startup.
         """
         with self._lock:
             record = self._store.get_document(document_id)
@@ -272,7 +360,10 @@ class PgVectorIngestionService:
             if stored_filename is not None:
                 target_path = self._resolve_stored_path(stored_filename)
                 if target_path.is_file():
-                    tombstone_path = self._new_tombstone_path()
+                    tombstone_path = self._new_tombstone_path(
+                        document_id,
+                        stored_filename,
+                    )
                     try:
                         os.replace(target_path, tombstone_path)
                     except OSError as exc:
@@ -285,21 +376,19 @@ class PgVectorIngestionService:
                     try:
                         os.replace(tombstone_path, target_path)
                     except OSError:
+                        # The database record still exists, so the next
+                        # startup reconciles this tombstone back to the
+                        # original file.  Never delete it here.
                         logger.warning(
-                            "数据库删除失败后无法恢复原文件，等待人工清理",
-                            exc_info=True,
+                            "数据库删除失败后暂时无法恢复原文件，将在下次启动重试"
                         )
                 raise
 
             if tombstone_path is not None:
-                try:
-                    tombstone_path.unlink()
-                except OSError:
-                    # The database deletion already committed; keep the
-                    # invisible tombstone for startup cleanup.
-                    logger.warning(
-                        "删除 tombstone 失败，启动时会再次尝试清理"
-                    )
+                # The database deletion already committed; removing the
+                # tombstone is best-effort.  A leftover tombstone is removed
+                # by the next startup once the database record is gone.
+                self._remove_tombstone(tombstone_path)
             return record
 
     # ------------------------------------------------------------------
@@ -317,12 +406,29 @@ class PgVectorIngestionService:
         return candidate
 
     def _is_tombstone(self, path: Path) -> bool:
-        """Return whether one file looks like a leftover deletion tombstone."""
-        return (
-            path.name.startswith(_TOMBSTONE_PREFIX)
-            and path.name.endswith(_TOMBSTONE_SUFFIX)
-        )
+        """Return whether one file looks like a parseable deletion tombstone."""
+        return _parse_tombstone_name(path) is not None
 
-    def _new_tombstone_path(self) -> Path:
-        """Return a fresh, unpredictable tombstone path inside upload_dir."""
-        return self._upload_dir / f"{_TOMBSTONE_PREFIX}{uuid4().hex}{_TOMBSTONE_SUFFIX}"
+    def _new_tombstone_path(
+        self,
+        document_id: str,
+        stored_filename: str,
+    ) -> Path:
+        """Return a fresh, parseable tombstone path for one upload.
+
+        Both identifiers are validated before use so the generated name
+        always matches :data:`_TOMBSTONE_RE` and never contains user
+        controlled input, path separators, or dot segments.
+        """
+        if not _DOCUMENT_ID_RE.fullmatch(document_id):
+            raise DocumentMetadataError("文档元数据损坏，无法读取")
+        if not _STORED_FILENAME_RE.fullmatch(stored_filename):
+            raise DocumentMetadataError("文档元数据损坏，无法读取")
+        upload_root = self._upload_dir.resolve()
+        tombstone = upload_root / (
+            f"{_TOMBSTONE_PREFIX}{document_id}-{stored_filename}-"
+            f"{uuid4().hex}{_TOMBSTONE_SUFFIX}"
+        )
+        if tombstone.exists():
+            raise DocumentIngestionError("文件保存冲突，请重试")
+        return tombstone

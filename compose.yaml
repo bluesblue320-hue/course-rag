@@ -52,9 +52,12 @@ services:
       RAG_RERANKER_MODEL: "${RAG_RERANKER_MODEL:-}"
       RAG_RERANKER_CANDIDATE_TOP_K: "${RAG_RERANKER_CANDIDATE_TOP_K:-15}"
       RAG_MIN_RELEVANCE_SCORE: "${RAG_MIN_RELEVANCE_SCORE:-0.35}"
-      # Database foundation: the default backend stays memory, so the backend
-      # does not depend on the db service and never connects during normal
-      # memory-mode startup.  The pgvector backend is wired in a later PR.
+      # Storage backend selection: memory is the default and the backend then
+      # never connects to the database.  The pgvector override
+      # (compose.pgvector.yaml) switches the backend to the PostgreSQL
+      # runtime.  DATABASE_URL is resolved from the environment (or this
+      # local default) and is intentionally not overridden by the pgvector
+      # override, so custom connection strings always win.
       VECTOR_STORE_BACKEND: "${VECTOR_STORE_BACKEND:-memory}"
       DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg://course_rag:course_rag@db:5432/course_rag}"
       HF_HOME: /cache/huggingface

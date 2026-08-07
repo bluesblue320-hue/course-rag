@@ -189,7 +189,7 @@ def build_pgvector_runtime(
             loaders=_standard_loaders(),
             max_upload_bytes=max_upload_bytes,
         )
-        ingestion_service.cleanup_tombstones()
+        ingestion_service.reconcile_tombstones()
         ingestion_service.ensure_builtin_document()
     except Exception:
         engine.dispose()

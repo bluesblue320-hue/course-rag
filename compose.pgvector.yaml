@@ -9,12 +9,14 @@
 #
 # The base compose file keeps VECTOR_STORE_BACKEND defaulting to memory, so
 # this override is what switches the backend to PostgreSQL + pgvector.
+# DATABASE_URL is resolved by the base compose file from the environment (or
+# its local default) and is intentionally NOT overridden here, so a custom
+# connection string set by the operator is always preserved.
 # Migrations are never applied automatically by the application.
 services:
   backend:
     environment:
       VECTOR_STORE_BACKEND: pgvector
-      DATABASE_URL: postgresql+psycopg://course_rag:course_rag@db:5432/course_rag
     depends_on:
       db:
         condition: service_healthy

@@ -101,6 +101,29 @@ jobs:
       - name: Docker Compose config check
         run: docker compose config --quiet
 
+      # Verifies that the pgvector override selects the backend without
+      # replacing an operator-provided DATABASE_URL.  A custom connection
+      # string must survive the merge untouched.
+      - name: Verify custom DATABASE_URL preserved by pgvector override
+        run: |
+          export CUSTOM_DATABASE_URL="postgresql+psycopg://custom_user:custom_password@db:5432/custom_db"
+          DATABASE_URL="$CUSTOM_DATABASE_URL" \
+            docker compose -f compose.yaml -f compose.pgvector.yaml config --format json \
+            > /tmp/compose-pgvector-config.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(
+              Path("/tmp/compose-pgvector-config.json").read_text(encoding="utf-8")
+          )
+          environment = config["services"]["backend"]["environment"]
+          assert environment["VECTOR_STORE_BACKEND"] == "pgvector"
+          expected = "postgresql+psycopg://custom_user:custom_password@db:5432/custom_db"
+          assert environment["DATABASE_URL"] == expected, environment["DATABASE_URL"]
+          print("custom DATABASE_URL preserved:", environment["DATABASE_URL"])
+          PY
+
       # Compiles the Alembic migration chain to SQL without starting a real
       # PostgreSQL container: DATABASE_URL only needs to be a valid scheme,
       # and offline generation never opens a connection.

@@ -1,10 +1,10 @@
 """Expose semantic retrieval, document management, and RAG answering."""
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Literal
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Request, UploadFile
@@ -69,24 +69,6 @@ UPLOAD_DIR = RUNTIME_DIR / "uploads"
 METADATA_PATH = RUNTIME_DIR / "documents.json"
 
 
-def create_app(
-    *,
-    embedding_service_factory: Callable[[], Any] | None = None,
-    generation_service_factory: Callable[[], Any] | None = None,
-    reranker_builder: Callable[..., Any] | None = None,
-) -> FastAPI:
-    """Return the application with optional test dependency injection.
-
-    When a factory is not provided, the module-level default class is
-    resolved at application startup, which keeps the existing monkeypatch
-    based test suite working and keeps ``uvicorn src.api:app`` unchanged.
-    """
-    app.state.embedding_service_factory = embedding_service_factory
-    app.state.generation_service_factory = generation_service_factory
-    app.state.reranker_builder = reranker_builder
-    return app
-
-
 def _build_reranker_config(
     final_top_k: int,
 ) -> tuple[bool, RerankerConfig | None, RerankerStatus]:
@@ -119,11 +101,7 @@ def initialize_search(app: FastAPI) -> None:
     else:
         app.state.upload_configuration_error = None
 
-    embedding_factory = (
-        getattr(app.state, "embedding_service_factory", None)
-        or EmbeddingService
-    )
-    embedding_service = embedding_factory()
+    embedding_service = EmbeddingService()
     app.state.embedding_service = embedding_service
     app.state.model_name = embedding_service.model_name
 
@@ -198,11 +176,8 @@ def initialize_search(app: FastAPI) -> None:
         reranker_enabled = bool(requested_enable)
         if reranker_config is not None and reranker_config.enabled:
             reranker_model_name = reranker_config.model_name or None
-            reranker_builder = (
-                getattr(app.state, "reranker_builder", None) or build_reranker
-            )
             try:
-                reranker_instance = reranker_builder(reranker_config)
+                reranker_instance = build_reranker(reranker_config)
                 retrieval_service = RetrievalService(
                     retriever=retriever,
                     config=reranker_config,
@@ -230,12 +205,8 @@ def initialize_search(app: FastAPI) -> None:
     app.state.rag_configuration_error = None
     app.state.min_relevance_score = None
 
-    generation_factory = (
-        getattr(app.state, "generation_service_factory", None)
-        or GenerationService
-    )
     try:
-        generation_service = generation_factory()
+        generation_service = GenerationService()
     except GenerationConfigurationError as exc:
         app.state.generation_configuration_error = exc
     else:

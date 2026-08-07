@@ -5,11 +5,13 @@ explicitly via :func:`create_database_engine` and must be disposed by the
 caller once they are no longer needed.
 """
 
+import configparser
 from pathlib import Path
 
 from alembic.config import Config as AlembicConfig
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError as AlembicCommandError
 from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -94,13 +96,20 @@ def check_database_schema(
     """Verify the database is migrated to the current Alembic head.
 
     This is a read-only readiness probe.  It never applies migrations,
-    never creates tables, and never modifies the schema.  The database
-    revision must equal the local migration head, the ``vector`` extension
-    must be installed, and both ``documents`` and ``chunks`` tables must
-    exist; otherwise :class:`DatabaseSchemaError` is raised.
+    never creates tables, and never modifies the schema.  Local Alembic
+    configuration problems (missing migration directory, unreadable config,
+    multiple heads) and database mismatches are all converted into the same
+    stable :class:`DatabaseSchemaError`; an unreachable database is converted
+    into :class:`DatabaseConnectionError`.
     """
-    local_head = _resolve_local_head(script_location, alembic_config_path)
     try:
+        local_head = _resolve_local_head(
+            script_location,
+            alembic_config_path,
+        )
+        if not local_head:
+            raise DatabaseSchemaError(_SCHEMA_NOT_READY)
+
         with engine.connect() as connection:
             if not _table_exists(connection, "alembic_version"):
                 raise DatabaseSchemaError(_SCHEMA_NOT_READY)
@@ -118,5 +127,12 @@ def check_database_schema(
         raise
     except OperationalError as exc:
         raise DatabaseConnectionError("数据库连接不可用") from exc
+    except (
+        AlembicCommandError,
+        configparser.Error,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise DatabaseSchemaError(_SCHEMA_NOT_READY) from exc
     except SQLAlchemyError as exc:
         raise DatabaseSchemaError(_SCHEMA_NOT_READY) from exc
