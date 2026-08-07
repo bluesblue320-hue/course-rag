@@ -2,7 +2,6 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
@@ -12,17 +11,18 @@ from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from src.document_chunker import chunk_document
-from src.document_loaders import (
-    MarkdownDocumentLoader,
-    PdfDocumentLoader,
-    TextDocumentLoader,
+from src.database.config import (
+    resolve_database_url_for_backend,
+    resolve_vector_store_backend,
 )
-from src.document_repository import DocumentRepository
 from src.documents import DocumentRecord
 from src.embedding import EmbeddingService
 from src.exceptions import (
     BuiltinDocumentDeletionError,
+    DatabaseConfigurationError,
+    DatabaseConnectionError,
+    DatabaseOperationError,
+    DatabaseSchemaError,
     DocumentIngestionError,
     DocumentMetadataError,
     DocumentNotFoundError,
@@ -39,10 +39,8 @@ from src.exceptions import (
 from src.generation import GenerationService
 from src.ingestion_service import (
     DEFAULT_MAX_UPLOAD_BYTES,
-    IngestionService,
     resolve_max_upload_bytes,
 )
-from src.knowledge_index import KnowledgeIndex
 from src.prompt_builder import PromptBuilder
 from src.rag_service import (
     RagService,
@@ -55,6 +53,11 @@ from src.reranker import (
     safe_reranker_model_display_name,
 )
 from src.retrieval_service import RetrievalService, build_reranker
+from src.storage.runtime import (
+    StorageRuntime,
+    build_memory_runtime,
+    build_pgvector_runtime,
+)
 
 #: Public reranker readiness states exposed by /health.
 RerankerStatus = Literal["disabled", "ready", "load_failed", "config_invalid"]
@@ -64,68 +67,30 @@ KNOWLEDGE_PATH = PROJECT_ROOT / "data" / "knowledge.txt"
 RUNTIME_DIR = PROJECT_ROOT / "data" / "runtime"
 UPLOAD_DIR = RUNTIME_DIR / "uploads"
 METADATA_PATH = RUNTIME_DIR / "documents.json"
-BUILTIN_DOCUMENT_ID = "builtin-knowledge"
-BUILTIN_FILENAME = "knowledge.txt"
 
 
-def _file_mtime_iso(path: Path) -> str:
-    """Return a file's modification time as a UTC ISO 8601 string."""
-    modified_at = datetime.fromtimestamp(
-        path.stat().st_mtime,
-        tz=timezone.utc,
-    )
-    return modified_at.isoformat(timespec="seconds").replace("+00:00", "Z")
+def _build_reranker_config(
+    final_top_k: int,
+) -> tuple[bool, RerankerConfig | None, RerankerStatus]:
+    """Resolve reranker configuration without loading any model.
 
-
-def _build_ingestion_dependencies(
-    embedding_service: EmbeddingService,
-    max_upload_bytes: int,
-) -> tuple[IngestionService, DocumentRecord]:
-    """Build the document repository, upload store, and initial index."""
-    loader = TextDocumentLoader()
-    builtin_loaded = loader.load(KNOWLEDGE_PATH)
-    builtin_document = DocumentRecord(
-        document_id=BUILTIN_DOCUMENT_ID,
-        original_filename=BUILTIN_FILENAME,
-        stored_filename=None,
-        content_type="text/plain",
-        size_bytes=KNOWLEDGE_PATH.stat().st_size,
-        text_length=builtin_loaded.text_length,
-        chunk_count=len(
-            chunk_document(
-                builtin_loaded,
-                BUILTIN_DOCUMENT_ID,
-                BUILTIN_FILENAME,
-            )
-        ),
-        created_at=_file_mtime_iso(KNOWLEDGE_PATH),
-        is_builtin=True,
-    )
-
-    repository = DocumentRepository(METADATA_PATH)
-    index = KnowledgeIndex()
-    ingestion_service = IngestionService(
-        embedding_service=embedding_service,
-        repository=repository,
-        index=index,
-        upload_dir=UPLOAD_DIR,
-        builtin_document=builtin_document,
-        builtin_path=KNOWLEDGE_PATH,
-        loaders={
-            ".txt": TextDocumentLoader(),
-            ".md": MarkdownDocumentLoader(),
-            ".pdf": PdfDocumentLoader(),
-        },
-        max_upload_bytes=max_upload_bytes,
-    )
-
-    valid_uploads = ingestion_service.reconcile_persisted_documents()
-    ingestion_service.initialize_index([builtin_document, *valid_uploads])
-    return ingestion_service, builtin_document
+    Returns ``(enabled, config, status)``; the status reports
+    ``config_invalid`` when the enable flag or config cannot be parsed.
+    """
+    requested_enable = requested_reranker_enabled()
+    if requested_enable is None:
+        return False, None, "config_invalid"
+    try:
+        reranker_config = resolve_reranker_config(final_top_k=final_top_k)
+    except (ValueError, RagError):
+        return requested_enable, None, "config_invalid"
+    if not reranker_config.enabled:
+        return False, None, "disabled"
+    return True, reranker_config, "ready"
 
 
 def initialize_search(app: FastAPI) -> None:
-    """Build retrieval, document, and optional generation dependencies."""
+    """Build the selected storage runtime and optional RAG dependencies."""
     load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
 
     try:
@@ -137,25 +102,66 @@ def initialize_search(app: FastAPI) -> None:
         app.state.upload_configuration_error = None
 
     embedding_service = EmbeddingService()
-    ingestion_service, _builtin_document = _build_ingestion_dependencies(
-        embedding_service,
-        max_upload_bytes,
-    )
-    index = ingestion_service.index
-
     app.state.embedding_service = embedding_service
-    app.state.ingestion_service = ingestion_service
-    app.state.knowledge_index = index
-    app.state.chunk_count = index.chunk_count
     app.state.model_name = embedding_service.model_name
-    app.state.retrieval_ready = True
 
-    # Build optional reranker (disabled by default; safe degradation on failure)
-    # Config resolution and model loading are kept separate so that a load
-    # failure can be reported as `load_failed` instead of silently appearing
-    # as "not enabled".  The health endpoint never leaks paths, stacks, or
-    # internal exception text, and the model name is redacted when it looks
-    # like a local path.
+    # Assemble the selected storage runtime.  Any database failure keeps the
+    # ASGI app alive in a degraded state: /health still answers, storage
+    # endpoints return stable 503s, and memory mode never touches the
+    # database at all.
+    backend: Literal["memory", "pgvector"] = "memory"
+    storage_runtime: StorageRuntime | None = None
+    storage_error: RagError | None = None
+    try:
+        backend = resolve_vector_store_backend()
+        if backend == "memory":
+            storage_runtime = build_memory_runtime(
+                embedding_service=embedding_service,
+                max_upload_bytes=max_upload_bytes,
+                knowledge_path=KNOWLEDGE_PATH,
+                upload_dir=UPLOAD_DIR,
+                metadata_path=METADATA_PATH,
+            )
+        else:
+            database_url = resolve_database_url_for_backend("pgvector")
+            assert database_url is not None
+            storage_runtime = build_pgvector_runtime(
+                embedding_service=embedding_service,
+                max_upload_bytes=max_upload_bytes,
+                database_url=database_url,
+                knowledge_path=KNOWLEDGE_PATH,
+                upload_dir=UPLOAD_DIR,
+                script_location=PROJECT_ROOT / "migrations",
+                alembic_config_path=PROJECT_ROOT / "alembic.ini",
+            )
+    except (
+        DatabaseConfigurationError,
+        DatabaseConnectionError,
+        DatabaseSchemaError,
+        DatabaseOperationError,
+    ) as exc:
+        storage_error = exc
+
+    app.state.storage_backend = backend
+    app.state.storage_error = storage_error
+    app.state.storage_runtime = storage_runtime
+    document_manager = (
+        storage_runtime.document_manager if storage_runtime is not None else None
+    )
+    retriever = storage_runtime.retriever if storage_runtime is not None else None
+    app.state.document_manager = document_manager
+    app.state.retriever = retriever
+    app.state.ingestion_service = document_manager
+    app.state.retrieval_ready = storage_runtime is not None
+    app.state.chunk_count = (
+        document_manager.chunk_count if document_manager is not None else 0
+    )
+    # Compatibility: memory mode keeps exposing the index object; new API code
+    # must use document_manager / retriever instead of this attribute.
+    app.state.knowledge_index = retriever if backend == "memory" else None
+
+    # Build the optional reranker (disabled by default; safe degradation on
+    # failure).  Only possible when the storage runtime is ready.
     reranker_instance = None
     retrieval_service: RetrievalService | None = None
     reranker_enabled = False
@@ -163,37 +169,26 @@ def initialize_search(app: FastAPI) -> None:
     reranker_model_name: str | None = None
     reranker_status: RerankerStatus = "disabled"
 
-    # First resolve whether the user actually requested reranking.  When the
-    # enable flag itself cannot be parsed (e.g. RAG_RERANKER_ENABLED=maybe),
-    # the system cannot confirm a request to enable, so the public
-    # `reranker_enabled` stays false while the status becomes config_invalid.
-    requested_enable = requested_reranker_enabled()
-    if requested_enable is None:
-        reranker_status = "config_invalid"
-    else:
-        reranker_enabled = requested_enable
-        try:
-            reranker_config = resolve_reranker_config(final_top_k=3)
-        except (ValueError, RagError):
-            reranker_status = "config_invalid"
-        else:
+    if storage_runtime is not None:
+        requested_enable, reranker_config, reranker_status = _build_reranker_config(
+            final_top_k=3,
+        )
+        reranker_enabled = bool(requested_enable)
+        if reranker_config is not None and reranker_config.enabled:
             reranker_model_name = reranker_config.model_name or None
-            if not reranker_config.enabled:
-                reranker_status = "disabled"
-            else:
-                try:
-                    reranker_instance = build_reranker(reranker_config)
-                    retrieval_service = RetrievalService(
-                        retriever=index,
-                        config=reranker_config,
-                        reranker=reranker_instance,
-                    )
-                    reranker_ready = retrieval_service.reranker_ready
-                    reranker_status = "ready" if reranker_ready else "load_failed"
-                except Exception:
-                    # Model present in config but could not be loaded (missing,
-                    # corrupt, offline-only miss, etc.).  Keep vector-only path.
-                    reranker_status = "load_failed"
+            try:
+                reranker_instance = build_reranker(reranker_config)
+                retrieval_service = RetrievalService(
+                    retriever=retriever,
+                    config=reranker_config,
+                    reranker=reranker_instance,
+                )
+                reranker_ready = retrieval_service.reranker_ready
+                reranker_status = "ready" if reranker_ready else "load_failed"
+            except Exception:
+                # Model present in config but could not be loaded (missing,
+                # corrupt, offline-only miss, etc.).  Keep vector-only path.
+                reranker_status = "load_failed"
 
     app.state.retrieval_service = retrieval_service
     app.state.reranker_enabled = reranker_enabled
@@ -218,11 +213,13 @@ def initialize_search(app: FastAPI) -> None:
         app.state.generation_service = generation_service
         app.state.llm_model_name = generation_service.model_name
         app.state.generation_ready = True
+        if storage_runtime is None:
+            return
         try:
             min_relevance_score = resolve_min_relevance_score()
             rag_service = RagService(
                 embedding_service=embedding_service,
-                retriever=index,
+                retriever=retriever,
                 prompt_builder=PromptBuilder(),
                 generation_service=generation_service,
                 min_relevance_score=min_relevance_score,
@@ -250,6 +247,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         if generation_service is not None:
             generation_service.close()
+        storage_runtime = getattr(app.state, "storage_runtime", None)
+        if storage_runtime is not None:
+            storage_runtime.close()
 
 
 class HealthResponse(BaseModel):
@@ -460,6 +460,66 @@ async def handle_upload_configuration_error(
     )
 
 
+@app.exception_handler(DatabaseConfigurationError)
+async def handle_database_configuration_error(
+    _request: Request,
+    _error: DatabaseConfigurationError,
+) -> JSONResponse:
+    """Report invalid storage configuration without exposing values."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "STORAGE_NOT_CONFIGURED",
+            "message": "存储服务配置无效",
+        },
+    )
+
+
+@app.exception_handler(DatabaseConnectionError)
+async def handle_database_connection_error(
+    _request: Request,
+    _error: DatabaseConnectionError,
+) -> JSONResponse:
+    """Report an unreachable storage backend with a stable message."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "STORAGE_UNAVAILABLE",
+            "message": "存储服务暂时不可用",
+        },
+    )
+
+
+@app.exception_handler(DatabaseSchemaError)
+async def handle_database_schema_error(
+    _request: Request,
+    _error: DatabaseSchemaError,
+) -> JSONResponse:
+    """Report a not-yet-migrated database schema."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "STORAGE_SCHEMA_NOT_READY",
+            "message": "数据库结构尚未准备完成",
+        },
+    )
+
+
+@app.exception_handler(DatabaseOperationError)
+async def handle_database_operation_error(
+    _request: Request,
+    _error: DatabaseOperationError,
+) -> JSONResponse:
+    """Report a failed database operation with a stable message."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "STORAGE_UNAVAILABLE",
+            "message": "存储服务暂时不可用",
+        },
+    )
+
+
 @app.exception_handler(UnsupportedDocumentTypeError)
 async def handle_unsupported_document_type(
     _request: Request,
@@ -580,14 +640,22 @@ async def handle_document_ingestion_error(
     )
 
 
+def _raise_storage_error(app: FastAPI) -> None:
+    """Raise the startup storage failure so handlers return a stable 503."""
+    storage_error = getattr(app.state, "storage_error", None)
+    if storage_error is not None:
+        raise storage_error
+
+
 @app.get("/health", response_model=HealthResponse)
 def health(request: Request) -> HealthResponse:
     """Return readiness for retrieval and answer generation."""
     # The model name is redacted through safe_reranker_model_display_name so a
     # local absolute path in the configuration never leaks into the payload.
     raw_reranker_model = getattr(request.app.state, "reranker_model", None)
+    storage_error = getattr(request.app.state, "storage_error", None)
     return HealthResponse(
-        status="ok",
+        status="degraded" if storage_error is not None else "ok",
         chunk_count=request.app.state.chunk_count,
         retrieval_ready=request.app.state.retrieval_ready,
         generation_ready=request.app.state.generation_ready,
@@ -603,6 +671,7 @@ def health(request: Request) -> HealthResponse:
 @app.post("/search", response_model=SearchResponse)
 def search(payload: SearchRequest, request: Request) -> SearchResponse:
     """Encode one query and return its most relevant source chunks."""
+    _raise_storage_error(request.app)
     started_at = perf_counter()
     query_embedding = request.app.state.embedding_service.encode_query(
         payload.query
@@ -634,7 +703,7 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
             for chunk in outcome.sources
         ]
     else:
-        results = request.app.state.knowledge_index.search(
+        results = request.app.state.retriever.search(
             query_embedding,
             top_k=payload.top_k,
         )
@@ -653,6 +722,7 @@ def search(payload: SearchRequest, request: Request) -> SearchResponse:
 @app.post("/ask", response_model=AskResponse)
 def ask(payload: AskRequest, request: Request) -> AskResponse:
     """Delegate one validated question to the initialized RAG pipeline."""
+    _raise_storage_error(request.app)
     rag_service = request.app.state.rag_service
     if rag_service is None:
         rag_configuration_error = request.app.state.rag_configuration_error
@@ -689,11 +759,13 @@ def _document_response(record: DocumentRecord) -> DocumentResponse:
 @app.get("/documents", response_model=DocumentListResponse)
 def list_documents(request: Request) -> DocumentListResponse:
     """Return the unified document list and current index totals."""
-    documents = request.app.state.ingestion_service.list_documents()
+    _raise_storage_error(request.app)
+    document_manager = request.app.state.document_manager
+    documents = document_manager.list_documents()
     return DocumentListResponse(
         documents=[_document_response(record) for record in documents],
         document_count=len(documents),
-        chunk_count=request.app.state.knowledge_index.chunk_count,
+        chunk_count=document_manager.chunk_count,
     )
 
 
@@ -718,21 +790,22 @@ def upload_document(
     file: UploadFile = File(...),
 ) -> DocumentResponse:
     """Validate, store, and index one uploaded knowledge document."""
+    _raise_storage_error(request.app)
     upload_configuration_error = request.app.state.upload_configuration_error
     if upload_configuration_error is not None:
         raise upload_configuration_error
 
-    ingestion_service = request.app.state.ingestion_service
+    document_manager = request.app.state.document_manager
     data = read_upload_with_limit(
         file,
-        ingestion_service.max_upload_bytes,
+        document_manager.max_upload_bytes,
     )
-    record = ingestion_service.ingest(
+    record = document_manager.ingest(
         file.filename or "",
         file.content_type or "",
         data,
     )
-    request.app.state.chunk_count = request.app.state.knowledge_index.chunk_count
+    request.app.state.chunk_count = document_manager.chunk_count
     return _document_response(record)
 
 
@@ -744,15 +817,15 @@ def delete_document(
     document_id: str,
     request: Request,
 ) -> DeleteDocumentResponse:
-    """Delete one uploaded document and rebuild the active index."""
-    request.app.state.ingestion_service.delete_document(document_id)
-    chunk_count = request.app.state.knowledge_index.chunk_count
+    """Delete one uploaded document and its stored chunks."""
+    _raise_storage_error(request.app)
+    document_manager = request.app.state.document_manager
+    document_manager.delete_document(document_id)
+    chunk_count = document_manager.chunk_count
     request.app.state.chunk_count = chunk_count
     return DeleteDocumentResponse(
         document_id=document_id,
         deleted=True,
-        document_count=len(
-            request.app.state.ingestion_service.list_documents()
-        ),
+        document_count=len(document_manager.list_documents()),
         chunk_count=chunk_count,
     )

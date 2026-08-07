@@ -93,11 +93,36 @@ jobs:
       - name: Python syntax check
         run: python -m compileall -q src scripts tests
 
+      # Unit tests run in memory mode and must never connect to a database;
+      # real-PostgreSQL coverage lives in the dedicated integration job.
       - name: Backend tests
-        run: python -m pytest -q
+        run: python -m pytest -q --ignore=tests/integration
 
       - name: Docker Compose config check
         run: docker compose config --quiet
+
+      # Verifies that the pgvector override selects the backend without
+      # replacing an operator-provided DATABASE_URL.  A custom connection
+      # string must survive the merge untouched.
+      - name: Verify custom DATABASE_URL preserved by pgvector override
+        run: |
+          export CUSTOM_DATABASE_URL="postgresql+psycopg://custom_user:custom_password@db:5432/custom_db"
+          DATABASE_URL="$CUSTOM_DATABASE_URL" \
+            docker compose -f compose.yaml -f compose.pgvector.yaml config --format json \
+            > /tmp/compose-pgvector-config.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(
+              Path("/tmp/compose-pgvector-config.json").read_text(encoding="utf-8")
+          )
+          environment = config["services"]["backend"]["environment"]
+          assert environment["VECTOR_STORE_BACKEND"] == "pgvector"
+          expected = "postgresql+psycopg://custom_user:custom_password@db:5432/custom_db"
+          assert environment["DATABASE_URL"] == expected, environment["DATABASE_URL"]
+          print("custom DATABASE_URL preserved:", environment["DATABASE_URL"])
+          PY
 
       # Compiles the Alembic migration chain to SQL without starting a real
       # PostgreSQL container: DATABASE_URL only needs to be a valid scheme,
@@ -112,6 +137,107 @@ jobs:
           grep -q "CREATE TABLE documents" /tmp/alembic-upgrade.sql
           grep -q "CREATE TABLE chunks" /tmp/alembic-upgrade.sql
           grep -qi "VECTOR(384)" /tmp/alembic-upgrade.sql
+
+  pgvector-integration:
+    name: PostgreSQL pgvector integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: course_rag
+          POSTGRES_USER: course_rag
+          POSTGRES_PASSWORD: course_rag
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U course_rag -d course_rag"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Real local test database inside the job; never uses GitHub Secrets.
+      DATABASE_URL: postgresql+psycopg://course_rag:course_rag@127.0.0.1:5432/course_rag
+      VECTOR_STORE_BACKEND: pgvector
+      LLM_API_KEY: ""
+      LLM_BASE_URL: ""
+      LLM_MODEL: ""
+      RAG_RERANKER_ENABLED: "false"
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_HOME: /tmp/course-rag-hf
+      SENTENCE_TRANSFORMERS_HOME: /tmp/course-rag-hf/sentence-transformers
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip packages (CPU-only)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-cpu-${{ runner.os }}-${{ hashFiles('requirements.txt') }}-torch-2.13.0
+          restore-keys: |
+            pip-cpu-${{ runner.os }}-
+
+      - name: Install CPU-only PyTorch
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.13.0"
+
+      - name: Install backend dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Assert CPU-only PyTorch runtime
+        run: |
+          python - <<'PY'
+          import torch
+          assert torch.__version__.endswith("+cpu"), f"expected CPU-only torch build, got {torch.__version__}"
+          assert torch.version.cuda is None, f"CUDA-enabled torch build, got cuda={torch.version.cuda}"
+          assert torch.cuda.is_available() is False, "torch.cuda.is_available() must be False on CPU-only builds"
+          print(f"CPU-only PyTorch verified: {torch.__version__} (cuda={torch.version.cuda}, available={torch.cuda.is_available()})")
+          PY
+
+      - name: Apply Alembic migrations
+        run: alembic upgrade head
+
+      - name: Show Alembic revision
+        run: alembic current
+
+      # Integration tests run against the real PostgreSQL service using
+      # FakeEmbeddingService / FakeGenerationService: no model is downloaded
+      # and no real LLM request is ever made.
+      - name: Run pgvector integration tests
+        run: python -m pytest -q tests/integration
+
+      - name: Verify no ANN indexes and vector extension
+        run: |
+          python - <<'PY'
+          import os
+          import psycopg
+          url = os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://")
+          with psycopg.connect(url) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'chunks'")
+                  rows = cur.fetchall()
+                  print("chunks indexes:", rows)
+                  for name, definition in rows:
+                      lowered = definition.lower()
+                      assert "hnsw" not in lowered, f"unexpected HNSW index: {name}"
+                      assert "ivfflat" not in lowered, f"unexpected IVFFlat index: {name}"
+                  cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                  version = cur.fetchone()
+                  assert version is not None, "vector extension is missing"
+                  print("vector extension version:", version[0])
+          PY
 
   frontend:
     name: Frontend (vitest, type-check, build)

@@ -30,7 +30,57 @@ Compose 启动三个服务：
 | `frontend` | 多阶段构建的 Vue 静态文件和 Nginx 反向代理 | 默认 `8080` | 请求 `/nginx-health` |
 | `db` | PostgreSQL 17 + pgvector 扩展（基础设施） | 不发布 | `pg_isready` |
 
-后端只在 Compose 内部网络暴露 `8000`，浏览器继续使用现有 `/api/*` 路径。Nginx 转发时移除 `/api` 前缀，因此 FastAPI 的 `/health`、`/search`、`/ask` 和 `/documents` 路径均保持不变。`db` 服务是**准备好的基础设施**：默认 `VECTOR_STORE_BACKEND=memory`，后端不连接数据库，`db` 未启动也不影响后端运行。
+后端只在 Compose 内部网络暴露 `8000`，浏览器继续使用现有 `/api/*` 路径。Nginx 转发时移除 `/api` 前缀，因此 FastAPI 的 `/health`、`/search`、`/ask` 和 `/documents` 路径均保持不变。`db` 服务默认是**准备好的基础设施**：基础 `compose.yaml` 保持 `VECTOR_STORE_BACKEND=memory`，后端不连接数据库，`db` 未启动也不影响后端运行。需要让后端真正使用 PostgreSQL + pgvector 时，使用 `compose.pgvector.yaml` override 启动（见下文）。
+
+## pgvector override 启动方式
+
+基础 `compose.yaml` 的 backend 不依赖 `db`，memory 模式无需数据库。要切换到 PostgreSQL + pgvector 存储后端：
+
+```powershell
+# 1. 启动数据库（仅 Compose 网络内可见，不映射宿主机端口）
+docker compose up -d db
+
+# 2. 构建 backend 镜像并显式执行迁移（应用启动不会自动迁移）
+docker compose build backend
+docker compose run --rm backend alembic upgrade head
+
+# 3. 用 pgvector override 启动 backend 和 frontend
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
+```
+
+PowerShell 单行等价命令：
+
+```powershell
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
+```
+
+`compose.pgvector.yaml` 只做两件事：把 `VECTOR_STORE_BACKEND` 设为 `pgvector`，并让 backend `depends_on db (condition: service_healthy)`，等待数据库健康后再启动。它**不会覆盖 `DATABASE_URL`**：连接串由基础 `compose.yaml` 从环境变量解析，自定义连接串始终保留。数据库未就绪或 schema 未迁移（含 Alembic 本地配置异常）时后端进入降级状态：`/health` 返回 `degraded`，存储相关接口返回稳定的 503（详见 [database.md](database.md)）。
+
+自定义数据库凭据时，`POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` 与 `DATABASE_URL` 必须保持一致，例如：
+
+```powershell
+$env:POSTGRES_USER="my_user"
+$env:POSTGRES_PASSWORD="my_password"
+$env:POSTGRES_DB="my_db"
+$env:DATABASE_URL="postgresql+psycopg://my_user:my_password@db:5432/my_db"
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
+```
+
+backend 重启方式（保留数据）：
+
+```powershell
+docker compose -f compose.yaml -f compose.pgvector.yaml restart backend
+```
+
+`postgres-data` 卷（`course-rag-postgres-data`）保存 PostgreSQL 数据目录：普通停止、重启和重新创建容器都不会删除它，pgvector 模式重启后文档、Chunk 与 Embedding 全部复用，不会重新计算。
+
+切回 memory：
+
+```powershell
+docker compose up -d backend frontend
+```
+
+memory 模式不依赖数据库，`db` 服务可以停止或删除而不影响后端。
 
 ## 前置条件
 
@@ -133,9 +183,9 @@ Compose 使用三个具名卷：
 
 | 卷 | 容器挂载点 | 保存内容 |
 | --- | --- | --- |
-| `course-rag-runtime` | `/app/data/runtime` | `uploads/` 上传原文件和 `documents.json` 元数据 |
+| `course-rag-runtime` | `/app/data/runtime` | `uploads/` 上传原文件和 `documents.json` 元数据（memory 模式） |
 | `course-rag-huggingface-cache` | `/cache/huggingface` | 默认 Embedding 模型等 Hugging Face 缓存 |
-| `course-rag-postgres-data` | `/var/lib/postgresql/data` | PostgreSQL 数据目录（基础设施，默认不参与 RAG） |
+| `course-rag-postgres-data` | `/var/lib/postgresql/data` | PostgreSQL 数据目录（pgvector 模式保存文档、Chunk 与 Embedding） |
 
 查看卷：
 
@@ -265,4 +315,4 @@ docker compose down
 
 这是本地演示和后续单机云部署的基础方案，不包含 TLS、身份认证、对象存储、多副本共享存储、GPU、Kubernetes 或自动化发布。后端不向宿主机发布端口、容器以非 root 用户运行并启用 `no-new-privileges`，密钥只通过 `.env` 注入、不写入镜像。具名卷属于当前 Docker 主机；迁移到另一台主机前需要单独备份。云部署阶段还应在外层补充 HTTPS、密钥管理和访问控制。
 
-数据库服务同样是基础设施边界：默认 `memory` 后端不使用数据库，`db` 不映射宿主机端口、不带密码之外的认证加固、不做备份；`VECTOR_STORE_BACKEND=pgvector` 的接入属于后续 PR。
+数据库服务同样是基础设施边界：默认 `memory` 后端不使用数据库，`db` 不映射宿主机端口、不带密码之外的认证加固、不做备份。`pgvector` 后端已可用，但仅在显式使用 `compose.pgvector.yaml` 时接管存储；本方案不提供生产级多租户隔离、高并发保证、水平扩展、ANN 索引、云对象存储或自动数据迁移。数据库 readiness 由 `compose.pgvector.yaml` 的 `depends_on` 与后端自身的 schema 检查共同保证。

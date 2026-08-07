@@ -89,6 +89,15 @@ def make_raw_results(n: int = 5) -> list[dict[str, object]]:
     ]
 
 
+def reranker_candidate_id(
+    document_id: str,
+    chunk_index: int,
+    rank: int,
+) -> str:
+    """Return the internal reranker candidate id for one raw result."""
+    return f"{document_id}:{chunk_index}:{rank}"
+
+
 def make_disabled_config(candidate_top_k: int = 15) -> RerankerConfig:
     return RerankerConfig(
         enabled=False,
@@ -182,7 +191,10 @@ class TestRetrievalServiceEnabled:
         config = make_enabled_config(candidate_top_k=10)
         # Reverse the order: last candidate gets highest score
         reranker = FakeReranker(
-            score_map={str(i): float(10 - i) for i in range(1, 11)}
+            score_map={
+                reranker_candidate_id(f"doc-{i}", i, i): float(10 - i)
+                for i in range(1, 11)
+            }
         )
         service = RetrievalService(retriever, config, reranker=reranker)
 
@@ -198,7 +210,15 @@ class TestRetrievalServiceEnabled:
         raw = make_raw_results(5)
         retriever = FakeRetriever(raw)
         config = make_enabled_config(candidate_top_k=5)
-        reranker = FakeReranker(score_map={"1": 0.99, "2": 0.88, "3": 0.77, "4": 0.66, "5": 0.55})
+        reranker = FakeReranker(
+            score_map={
+                reranker_candidate_id("doc-1", 1, 1): 0.99,
+                reranker_candidate_id("doc-2", 2, 2): 0.88,
+                reranker_candidate_id("doc-3", 3, 3): 0.77,
+                reranker_candidate_id("doc-4", 4, 4): 0.66,
+                reranker_candidate_id("doc-5", 5, 5): 0.55,
+            }
+        )
         service = RetrievalService(retriever, config, reranker=reranker)
 
         outcome = service.retrieve([0.0], "query", final_top_k=2)
@@ -214,7 +234,15 @@ class TestRetrievalServiceEnabled:
         raw = make_raw_results(5)
         retriever = FakeRetriever(raw)
         config = make_enabled_config(candidate_top_k=5)
-        reranker = FakeReranker(score_map={"1": 0.99, "2": 0.88, "3": 0.77, "4": 0.66, "5": 0.55})
+        reranker = FakeReranker(
+            score_map={
+                reranker_candidate_id("doc-1", 1, 1): 0.99,
+                reranker_candidate_id("doc-2", 2, 2): 0.88,
+                reranker_candidate_id("doc-3", 3, 3): 0.77,
+                reranker_candidate_id("doc-4", 4, 4): 0.66,
+                reranker_candidate_id("doc-5", 5, 5): 0.55,
+            }
+        )
         service = RetrievalService(retriever, config, reranker=reranker)
 
         outcome = service.retrieve([0.0], "query", final_top_k=3)
@@ -227,7 +255,13 @@ class TestRetrievalServiceEnabled:
         retriever = FakeRetriever(raw)
         config = make_enabled_config(candidate_top_k=5)
         reranker = FakeReranker(
-            score_map={"5": 10.0, "4": 8.0, "3": 6.0, "2": 4.0, "1": 2.0}
+            score_map={
+                reranker_candidate_id("doc-5", 5, 5): 10.0,
+                reranker_candidate_id("doc-4", 4, 4): 8.0,
+                reranker_candidate_id("doc-3", 3, 3): 6.0,
+                reranker_candidate_id("doc-2", 2, 2): 4.0,
+                reranker_candidate_id("doc-1", 1, 1): 2.0,
+            }
         )
         service = RetrievalService(retriever, config, reranker=reranker)
 
@@ -245,7 +279,13 @@ class TestRetrievalServiceEnabled:
         retriever = FakeRetriever(raw)
         config = make_enabled_config(candidate_top_k=5)
         reranker = FakeReranker(
-            score_map={"5": 10.0, "4": 8.0, "3": 6.0, "2": 4.0, "1": 2.0}
+            score_map={
+                reranker_candidate_id("doc-5", 5, 5): 10.0,
+                reranker_candidate_id("doc-4", 4, 4): 8.0,
+                reranker_candidate_id("doc-3", 3, 3): 6.0,
+                reranker_candidate_id("doc-2", 2, 2): 4.0,
+                reranker_candidate_id("doc-1", 1, 1): 2.0,
+            }
         )
         service = RetrievalService(retriever, config, reranker=reranker)
 
@@ -260,7 +300,10 @@ class TestRetrievalServiceEnabled:
         retriever = FakeRetriever(raw)
         config = make_enabled_config(candidate_top_k=5)
         reranker = FakeReranker(
-            score_map={"5": 10.0, "1": 1.0}  # reverse order
+            score_map={
+                reranker_candidate_id("doc-5", 5, 5): 10.0,
+                reranker_candidate_id("doc-1", 1, 1): 1.0,
+            }  # reverse order
         )
         service = RetrievalService(retriever, config, reranker=reranker)
 
@@ -269,6 +312,51 @@ class TestRetrievalServiceEnabled:
         # max_retrieval_score is the highest cosine similarity, not rerank score
         assert outcome.max_retrieval_score == 0.9  # raw[0].score
 
+    def test_candidate_id_no_collision_across_documents(self) -> None:
+        """Two documents sharing chunk_index=0 must not collide internally."""
+        raw = [
+            {
+                "rank": 1,
+                "score": 0.8,
+                "text": "doc-a chunk 0",
+                "chunk_index": 0,
+                "document_id": "doc-a",
+                "filename": "a.md",
+                "page_number": None,
+            },
+            {
+                "rank": 2,
+                "score": 0.7,
+                "text": "doc-b chunk 0",
+                "chunk_index": 0,
+                "document_id": "doc-b",
+                "filename": "b.md",
+                "page_number": None,
+            },
+        ]
+        retriever = FakeRetriever(raw)
+        config = make_enabled_config(candidate_top_k=2)
+        # Give the second-ranked candidate (doc-b) the higher rerank score so
+        # it must win; a chunk_index-only id would collide and mis-apply it.
+        reranker = FakeReranker(
+            score_map={
+                reranker_candidate_id("doc-a", 0, 1): 1.0,
+                reranker_candidate_id("doc-b", 0, 2): 10.0,
+            }
+        )
+        service = RetrievalService(retriever, config, reranker=reranker)
+
+        outcome = service.retrieve([0.0], "query", final_top_k=2)
+
+        assert outcome.reranker_applied is True
+        assert outcome.sources[0].document_id == "doc-b"
+        assert outcome.sources[0].rerank_score == 10.0
+        assert outcome.sources[1].document_id == "doc-a"
+        assert outcome.sources[1].rerank_score == 1.0
+        # retrieval_score remains the original vector score per chunk
+        assert outcome.sources[0].retrieval_score == 0.7
+        assert outcome.sources[1].retrieval_score == 0.8
+
     def test_stable_tie_breaker(self) -> None:
         """When rerank scores are equal, original order is preserved."""
         raw = make_raw_results(5)
@@ -276,7 +364,10 @@ class TestRetrievalServiceEnabled:
         config = make_enabled_config(candidate_top_k=5)
         # All same score → stable sort by retrieval_rank
         reranker = FakeReranker(
-            score_map={"1": 5.0, "2": 5.0, "3": 5.0, "4": 5.0, "5": 5.0}
+            score_map={
+                reranker_candidate_id(f"doc-{i}", i, i): 5.0
+                for i in range(1, 6)
+            }
         )
         service = RetrievalService(retriever, config, reranker=reranker)
 
@@ -388,7 +479,9 @@ class TestRagServiceWithRetrieval:
         ]
         retriever = FakeRetriever(raw)
         config = make_enabled_config(candidate_top_k=5)
-        reranker = FakeReranker(score_map={"0": 10.0})
+        reranker = FakeReranker(
+            score_map={reranker_candidate_id("d", 0, 1): 10.0}
+        )
         retrieval_service = RetrievalService(retriever, config, reranker=reranker)
 
         embedding = FakeEmbeddingService()
@@ -439,7 +532,9 @@ class TestRagServiceWithRetrieval:
         ]
         retriever = FakeRetriever(raw)
         config = make_enabled_config(candidate_top_k=5)
-        reranker = FakeReranker(score_map={"0": 10.0})
+        reranker = FakeReranker(
+            score_map={reranker_candidate_id("d", 0, 1): 10.0}
+        )
         retrieval_service = RetrievalService(retriever, config, reranker=reranker)
 
         embedding = FakeEmbeddingService()

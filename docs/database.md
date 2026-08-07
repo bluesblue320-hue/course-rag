@@ -1,150 +1,273 @@
-# PostgreSQL 与 pgvector 数据库基础设施
+# PostgreSQL 与 pgvector 存储后端
 
-本文档说明本仓库提供的 PostgreSQL + pgvector 基础设施。**当前它只作为准备好的基础设施存在，不参与生产 RAG 请求**。
+本文档说明本仓库的两种存储后端：默认的 `memory`（JSON + 内存索引）与 `pgvector`（PostgreSQL + pgvector 向量检索）。`memory` 仍是默认后端；`pgvector` 后端已完整实现并接管上传、删除、检索与问答。
 
-## 1. 当前架构
+## 1. 架构
 
 ```text
 浏览器 ── frontend（Nginx）── backend（FastAPI）
-                              ├── 检索: KnowledgeIndex（内存 NumPy 余弦相似度）
-                              ├── 元数据: DocumentRepository（data/runtime/documents.json）
-                              └── 数据库（基础设施，默认不连接）
-                                    db 服务（pgvector/pgvector:pg17，Compose 网络内）
+                              ├── memory（默认）:
+                              │    检索: KnowledgeIndex（内存 NumPy 余弦相似度）
+                              │    元数据: DocumentRepository（data/runtime/documents.json）
+                              │    不连接 PostgreSQL
+                              └── pgvector:
+                                    documents 表（文档元数据）
+                                    chunks 表（Chunk 文本、来源、VECTOR(384) Embedding）
+                                    PostgreSQL 内执行 pgvector 余弦相似度检索
 ```
 
 | 组件 | 作用 |
 | --- | --- |
-| `src/database/config.py` | 解析 `VECTOR_STORE_BACKEND` 与 `DATABASE_URL`，校验非法值 |
-| `src/database/engine.py` | 显式创建 SQLAlchemy engine / session factory，`SELECT 1` 连接检查 |
-| `src/database/base.py` | Declarative Base 与 `DEFAULT_EMBEDDING_DIMENSION = 384` |
-| `src/database/models.py` | `documents` 与 `chunks` ORM 模型 |
-| `migrations/` | Alembic 迁移环境与首个 schema 版本 |
+| `src/storage/protocols.py` | 应用层统一协议：`DocumentManagerProtocol` / `ChunkRetrieverProtocol` |
+| `src/storage/runtime.py` | `StorageRuntime` 装配：按 `VECTOR_STORE_BACKEND` 选择 memory 或 pgvector |
+| `src/storage/pgvector_store.py` | PostgreSQL 持久化与 pgvector 检索（事务、向量验证、异常脱敏） |
+| `src/pgvector_ingestion_service.py` | pgvector 运行时：上传校验、文件存储、切分、Embedding、删除协调 |
+| `src/database/` | 配置解析、engine / session、ORM 模型、schema 检查 |
+| `migrations/` | Alembic 迁移环境与 schema 版本 |
 
-## 2. PR #10 只提供基础设施
-
-本 PR 只建立数据库地基：依赖、配置、engine、ORM 模型、Docker 服务与首个 migration。它**不**切换任何现有 RAG 行为，`PgVectorStore` 由后续 PR 实现。
-
-## 3. 默认 VECTOR_STORE_BACKEND=memory
+## 2. 选择后端
 
 ```env
-VECTOR_STORE_BACKEND=memory
+VECTOR_STORE_BACKEND=memory      # 默认：现有 JSON + 内存索引，不连接数据库
+VECTOR_STORE_BACKEND=pgvector    # PostgreSQL + pgvector，要求有效 DATABASE_URL
 ```
 
-- 未设置、空值或 `memory`（大小写不敏感）→ 内存后端，不要求 `DATABASE_URL`
-- `pgvector` → 要求有效的 `postgresql+psycopg://` 连接串，否则启动配置校验会报错
+- 未设置、空值或 `memory`（大小写不敏感）→ 内存后端，**不读取** `DATABASE_URL`、不创建 engine、不连接 PostgreSQL
+- `pgvector` → 要求有效的 `postgresql+psycopg://` 连接串；缺失或非法时应用进入降级状态（见第 7 节）
 - 任何其他值都会抛出稳定的 `DatabaseConfigurationError`（“数据库配置无效”），错误消息不包含连接串或密码
 
-## 4. PostgreSQL 尚未接管 RAG 请求
+## 3. memory 模式启动
 
-memory 模式下：
+```powershell
+uvicorn src.api:app --reload
+```
 
-- 上传文档仍写入 `data/runtime/uploads/`，元数据仍写入 `data/runtime/documents.json`
-- 检索仍使用 `KnowledgeIndex` 与 NumPy 余弦相似度
-- `/search`、`/ask`、`/documents` 的响应结构不变
+memory 模式：
+
+- 上传文档写入 `data/runtime/uploads/`，元数据写入 `data/runtime/documents.json`
+- 检索使用 `KnowledgeIndex` 与 NumPy 余弦相似度
 - 应用启动不创建数据库 engine、不连接 PostgreSQL、不执行 Alembic
 - 即使 `db` 服务停止，memory 模式后端照常工作
+- `documents.json` 中的数据保持原样，不会被迁移到 PostgreSQL
 
-## 5. Docker 启动数据库
+## 4. pgvector 模式启动
+
+先启动数据库并执行迁移（数据库只在 Compose 网络内暴露，不映射宿主机端口）：
 
 ```powershell
 docker compose up -d db
-docker compose ps
-docker compose logs db --tail 100
-```
-
-`db` 服务使用 `pgvector/pgvector:pg17`，数据库只通过 Compose 网络暴露（`expose: 5432`），**默认不映射到宿主机端口**。如果需要在宿主机上调试，可以临时用 override 暴露端口，例如：
-
-```powershell
-docker compose run --rm --service-ports db
-```
-
-不要在默认 `compose.yaml` 中打开 `5432:5432`。
-
-## 6. Alembic upgrade
-
-```powershell
-docker compose build backend   # 镜像包含新依赖与迁移文件
+docker compose build backend
 docker compose run --rm backend alembic upgrade head
 docker compose run --rm backend alembic current
+```
+
+再以 pgvector 模式启动应用：
+
+```powershell
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
+```
+
+也可以在本地直接运行（需要本机可访问的 PostgreSQL）：
+
+```powershell
+$env:VECTOR_STORE_BACKEND="pgvector"
+$env:DATABASE_URL="postgresql+psycopg://course_rag:course_rag@localhost:5432/course_rag"
+uvicorn src.api:app --reload
+```
+
+pgvector 模式启动时的初始化顺序：
+
+1. 解析 `DATABASE_URL`（缺失/非法 → 降级）
+2. 创建 SQLAlchemy engine 与 session factory
+3. 检查数据库可连接（`SELECT 1`）
+4. 检查 schema 就绪（Alembic revision、`vector` 扩展、`documents` / `chunks` 表）
+5. 创建 `PgVectorStore` 与 `PgVectorIngestionService`
+6. reconcile 遗留 tombstone（按数据库状态恢复或清理，见第 7 节）
+7. 初始化内置文档 `builtin-knowledge`（首次写入，重启复用）
+
+**应用启动不会自动执行 Alembic 迁移**；schema 变更始终是显式运维动作。本地 Alembic 配置问题（migration 目录缺失、配置损坏、多个 head）与数据库 revision 不匹配一样，都会转换为稳定的 `DatabaseSchemaError`，应用进入降级状态而不是启动失败。
+
+## 5. 迁移命令
+
+```powershell
+# 查看当前状态
+docker compose run --rm backend alembic current
 docker compose run --rm backend alembic history
+
+# 升级到最新
+docker compose run --rm backend alembic upgrade head
+
+# 回滚后重新应用（用于验证迁移链）
+docker compose run --rm backend alembic downgrade base
+docker compose run --rm backend alembic upgrade head
 ```
 
 迁移内容：
 
 1. `CREATE EXTENSION IF NOT EXISTS vector`
-2. 创建 `documents` 表（含非负与 status 检查约束）
-3. 创建 `chunks` 表（含 `VECTOR(384)` embedding 列、外键 CASCADE、唯一约束与检查约束）
-4. 创建普通 B-tree 索引 `ix_chunks_document_id`
+2. 创建 `documents` 表（非负与 status 检查约束）
+3. 创建 `chunks` 表（`VECTOR(384)` embedding 列、外键 `ON DELETE CASCADE`、唯一约束与检查约束）
+4. 创建普通 B-tree 索引 `ix_chunks_document_id`（**没有** HNSW / IVFFlat）
 
-`DATABASE_URL` 必须存在且以 `postgresql+psycopg://` 开头；`migrations/env.py` 会覆盖 `alembic.ini` 中的占位值。
+## 6. compose.pgvector.yaml
 
-## 7. Alembic downgrade
+`compose.pgvector.yaml` 是 pgvector 模式的 Compose override：
+
+- 把 `VECTOR_STORE_BACKEND` 设为 `pgvector`
+- 给 backend 增加 `depends_on: db (condition: service_healthy)`，等待数据库就绪
+- **不设置 `DATABASE_URL`**：连接串始终由基础 `compose.yaml` 从环境变量解析（默认 `postgresql+psycopg://course_rag:course_rag@db:5432/course_rag`），因此自定义连接串永远不会被 override 覆盖
+
+如果自定义了 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`，必须同步设置 `DATABASE_URL`，例如：
 
 ```powershell
-docker compose run --rm backend alembic downgrade base
+$env:POSTGRES_USER="my_user"
+$env:POSTGRES_PASSWORD="my_password"
+$env:POSTGRES_DB="my_db"
+$env:DATABASE_URL="postgresql+psycopg://my_user:my_password@db:5432/my_db"
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
 ```
 
-- 删除 `chunks` 索引、`chunks` 表和 `documents` 表
-- **不会**执行 `DROP EXTENSION vector`：扩展可能由数据库管理员或其他 schema 共用；如需彻底清理，由管理员显式执行 `DROP EXTENSION vector`
-- downgrade 后再 `alembic upgrade head` 必须成功
+基础 `compose.yaml` 保持 `VECTOR_STORE_BACKEND` 默认 `memory`，backend **不**依赖 `db` 服务，memory 模式启动时不需要数据库。
 
-## 8. 查看 vector 扩展
+## 7. tombstone 补偿机制
 
-```powershell
-docker compose exec -T db `
-  psql -U course_rag -d course_rag `
-  -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
+pgvector 模式删除文档时，本地原文件与数据库无法构成真正的 ACID 事务，因此使用**补偿式一致性机制**（内部 tombstone 文件）：
+
+1. 删除前把原文件原子重命名为可解析的 tombstone（文件名携带文档 ID 与存储文件名）
+2. 执行数据库删除事务（Chunk 通过 `ON DELETE CASCADE` 级联删除）
+3. 数据库提交成功后删除 tombstone
+
+失败补偿：
+
+- 数据库删除失败 → 立即把 tombstone 恢复为原文件；若即时恢复也失败，tombstone 被保留，数据库记录仍在，**下次启动时按数据库状态自动恢复**
+- 数据库删除成功但 tombstone 删除失败 → 删除仍视为成功，遗留 tombstone 在下次启动时（此时数据库记录已不存在）被自动清理
+- 无法识别的 tombstone 或与数据库记录不一致的 tombstone：**不会被无条件删除**，保留供人工检查，只记录固定警告，不输出文件路径或异常堆栈
+
+tombstone 是内部实现细节，不属于公共 API。
+
+## 7. 数据库不可用时的行为（降级）
+
+当选择 `VECTOR_STORE_BACKEND=pgvector` 但出现：
+
+- `DATABASE_URL` 缺失或非法
+- 数据库不可连接
+- Alembic 未执行 / revision 不匹配 / `vector` 扩展缺失 / 表缺失
+
+应用**仍能启动**并响应：
+
+```text
+GET /health  → 200，status="degraded"，retrieval_ready=false，rag_ready=false，chunk_count=0
+POST /search → 503 STORAGE_*（配置无效 / 不可用 / schema 未就绪）
+POST /ask    → 503 STORAGE_*
+GET  /documents → 503 STORAGE_*
+POST /documents → 503 STORAGE_*
+DELETE /documents/{id} → 503 STORAGE_*
 ```
 
-## 9. 查看表结构
+错误码映射：
+
+| 异常 | HTTP | code | 消息 |
+| --- | --- | --- | --- |
+| `DatabaseConfigurationError` | 503 | `STORAGE_NOT_CONFIGURED` | 存储服务配置无效 |
+| `DatabaseConnectionError` | 503 | `STORAGE_UNAVAILABLE` | 存储服务暂时不可用 |
+| `DatabaseSchemaError` | 503 | `STORAGE_SCHEMA_NOT_READY` | 数据库结构尚未准备完成 |
+| `DatabaseOperationError` | 503 | `STORAGE_UNAVAILABLE` | 存储服务暂时不可用 |
+
+响应绝不会包含 `DATABASE_URL`、用户名、密码、主机名、SQL、驱动错误文本、本地文件路径或异常堆栈。memory 模式的数据库故障不影响应用。schema 检查失败（含 Alembic 本地配置异常）时应用进入降级状态而不是启动失败。
+
+## 8. 查看数据
 
 ```powershell
-docker compose exec -T db psql -U course_rag -d course_rag -c "\dt"
+docker compose exec -T db psql -U course_rag -d course_rag -c "SELECT count(*) FROM documents;"
+docker compose exec -T db psql -U course_rag -d course_rag -c "SELECT count(*) FROM chunks;"
 docker compose exec -T db psql -U course_rag -d course_rag -c "\d documents"
 docker compose exec -T db psql -U course_rag -d course_rag -c "\d chunks"
 ```
 
-## 10. named volume 持久化
-
-`postgres-data` 卷（`course-rag-postgres-data`）保存数据库数据目录。普通停止、重启、重新创建容器都不会删除卷：
+查看 vector 列与扩展版本：
 
 ```powershell
-docker compose stop db
-docker compose start db
-docker compose down        # 保留卷
+docker compose exec -T db psql -U course_rag -d course_rag `
+  -c "SELECT document_id, chunk_index, vector_dims(embedding) AS dims FROM chunks LIMIT 5;"
+docker compose exec -T db psql -U course_rag -d course_rag `
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
 ```
 
-只有 `docker compose down --volumes` 才会永久删除 `course-rag-postgres-data`（以及 `rag-runtime`、`huggingface-cache`）。
+查看 Alembic revision：
 
-## 11. 数据库密码安全
+```powershell
+docker compose run --rm backend alembic current
+```
 
-- `.env.example` 中的 `POSTGRES_PASSWORD=course_rag` 只是本地开发默认值，**生产环境必须替换**
-- `.env` 已被 `.gitignore` 排除，绝不能提交
-- `DATABASE_URL` 错误消息、日志和异常均不包含密码、用户名、主机或完整连接串
+## 9. 删除级联验证
 
-## 12. 常见错误
+删除文档后，其 Chunk 通过外键 `ON DELETE CASCADE` 自动删除：
+
+```powershell
+docker compose exec -T db psql -U course_rag -d course_rag `
+  -c "SELECT count(*) FROM chunks c JOIN documents d ON d.document_id = c.document_id WHERE d.document_id = '<文档ID>';"
+```
+
+删除前应为非 0，删除后该查询返回 0。
+
+## 10. 重启持久化验证
+
+```powershell
+# 上传一份文档后重启 backend
+docker compose -f compose.yaml -f compose.pgvector.yaml restart backend
+# 文档、Chunk 与 Embedding 都保存在 postgres-data 卷中，重启后直接复用
+docker compose -f compose.yaml -f compose.pgvector.yaml exec -T db psql -U course_rag -d course_rag -c "SELECT count(*) FROM documents;"
+```
+
+应用重启**不会**重新计算已上传文档和内置文档的 Embedding：数据库里已保存的向量直接复用。
+
+## 11. 如何切回 memory
+
+```powershell
+docker compose -f compose.yaml up -d backend frontend
+```
+
+或不带 override 启动。memory 模式继续使用 `data/runtime/documents.json`（其中已有的上传记录原样可用）；pgvector 模式写入的 PostgreSQL 数据不会被读取，两个数据集彼此独立。
+
+## 12. 当前不自动迁移 documents.json
+
+`documents.json` 中的现有数据**不会**被自动导入 PostgreSQL。数据库表保持只有新上传内容的状态，直到后续显式实现数据迁移逻辑。不要在 pgvector 模式下期待历史 JSON 记录自动出现。
+
+## 13. 当前不自动同步 knowledge.txt 变化
+
+内置文档 `knowledge.txt` 只在首次写入时切分并计算 Embedding；应用重启时若内置文档已存在则直接复用，**不检测内容变化**。如果 `knowledge.txt` 内容发生变化，需要后续显式重建机制；本仓库当前不提供自动增量同步。
+
+## 14. 测试数据清理
+
+安全清理测试期间写入的上传文档（保留内置文档）：
+
+```powershell
+docker compose exec -T db psql -U course_rag -d course_rag `
+  -c "DELETE FROM documents WHERE document_id <> 'builtin-knowledge';"
+```
+
+完全清空数据库（会删除全部数据，包括内置文档与历史上传）：
+
+```powershell
+docker compose exec -T db psql -U course_rag -d course_rag -c "DELETE FROM chunks; DELETE FROM documents;"
+```
+
+**不要随意执行 `docker compose down -v`**：它会永久删除 `postgres-data`、`rag-runtime` 与 `huggingface-cache` 三个具名卷，包括上传原文件、模型缓存和全部数据库数据。
+
+## 15. 常见错误
 
 | 现象 | 原因与处理 |
 | --- | --- |
+| `/health` 返回 `degraded` | pgvector 配置或数据库未就绪；查看第 7 节错误码 |
 | `alembic upgrade head` 报数据库配置无效 | `DATABASE_URL` 未设置、为空或不是 `postgresql+psycopg://` 开头 |
 | `db` 容器一直 unhealthy | 检查 `docker compose logs db`；本地首次启动需要几秒完成初始化 |
 | 端口冲突 | `db` 不映射宿主机端口，不存在冲突；宿主机调试请用 override 临时映射 |
 | 重复执行 migration 报表已存在 | 先 `alembic current` 确认版本，正常情况不会重复建表 |
-
-## 13. 后续 PR #11 将实现 PgVectorStore
-
-后续 PR 会用 `PgVectorStore` 把上传、删除、检索接入 PostgreSQL：写入 `documents` / `chunks`、按 `embedding <=>` 相似度检索、并按 `VECTOR_STORE_BACKEND` 切换后端。届时才会涉及数据库 readiness 与条件依赖。
-
-## 14. 当前没有 HNSW / IVFFlat
-
-本 PR 只建立普通 B-tree 索引。**没有**创建 HNSW、IVFFlat、cosine ANN 或部分向量索引；ANN 索引属于后续 PR 的显式决策。
-
-## 15. 当前没有自动迁移 documents.json
-
-`documents.json` 中的现有数据不会被自动导入 PostgreSQL；数据库表保持空表状态，直到后续 PR 显式实现数据迁移逻辑。
+| 上传后 /search 检索不到 | 确认查询文本与上传 Chunk 语义相近；pgvector 只检索 `status='ready'` 的文档 |
 
 ## 当前部署边界
 
 - 数据库仅本地开发用途，未配置 TLS、备份、多副本或用户权限体系
-- `VECTOR_STORE_BACKEND=pgvector` 尚未生效，即使开启也不会改变当前 RAG 行为
-- 生产级数据库运维（高可用、备份、监控）不在本 PR 范围
+- 本实现不提供生产级多租户隔离、高并发保证、水平扩展或 ANN 索引
+- 不支持云对象存储、自动数据迁移或 knowledge.txt 自动同步
+- 生产级数据库运维（高可用、备份、监控）不在本仓库范围

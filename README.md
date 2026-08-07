@@ -38,11 +38,12 @@
 - 通过 `python -m scripts.evaluate_rag` 输出 Hit@K、Recall@K、MRR 与回答/拒答混淆矩阵
 - 在 calibration split 上扫描相似度阈值并给出确定性的推荐值，不自动改写生产配置
 - 提供 FastAPI、Vue 构建、Nginx 反向代理、具名卷和健康检查组成的 Docker Compose 一键启动方案
-- 提供 PostgreSQL + pgvector 数据库基础设施：`documents` 与 `chunks` 表、`VECTOR(384)` 列、Alembic 迁移和 `src/database/` 配置模块（`VECTOR_STORE_BACKEND=memory` 仍为默认，PostgreSQL 尚未接管 RAG 请求）
+- 提供 PostgreSQL + pgvector 存储后端：`VECTOR_STORE_BACKEND=pgvector` 时由 PostgreSQL 持久化文档元数据、Chunk 文本与 `VECTOR(384)` Embedding，检索在数据库内执行余弦相似度查询
+- `VECTOR_STORE_BACKEND=memory` 仍是默认后端：现有 `documents.json` 与内存 `KnowledgeIndex` 继续负责上传、删除、检索和问答，完全不连接 PostgreSQL
 
 ## 当前没有实现
 
-本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、向量数据库接入、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、BM25 或混合检索。已提供 PostgreSQL + pgvector 的 schema 与 Alembic migration，但生产 RAG 仍默认使用内存索引和 JSON 元数据，`PgVectorStore` 尚未接入，上传、删除、检索和问答仍走原有内存流程。评估只覆盖检索质量与拒答决策，不评估生成答案的质量，也不评估答案忠实度。本地 JSON 和文件系统只是当前实现，不代表生产级存储方案。
+本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、BM25 或混合检索。PostgreSQL + pgvector 后端已经可用，但默认仍使用内存索引和 JSON 元数据；`pgvector` 模式不会自动迁移 `documents.json` 中的历史数据，也不会创建 HNSW / IVFFlat 等 ANN 索引。评估只覆盖检索质量与拒答决策，不评估生成答案的质量，也不评估答案忠实度。本地 JSON 和文件系统只是默认实现，不代表生产级存储方案。
 
 ## 项目目录
 
@@ -64,7 +65,9 @@ course-rag/
 │   ├── document_loaders.py   # TXT / Markdown / PDF 加载器
 │   ├── document_chunker.py   # 带元数据的 Chunk 生成
 │   ├── document_repository.py# 本地 JSON 文档元数据仓库
-│   ├── ingestion_service.py  # 上传、删除与索引重建编排
+│   ├── ingestion_service.py  # 上传、删除与索引重建编排（memory 运行时）
+│   ├── pgvector_ingestion_service.py  # pgvector 运行时：文件、切分、Embedding 与事务编排
+│   ├── storage/              # 存储抽象：协议、运行时装配、PgVectorStore
 │   ├── prompt_builder.py      # 组装课程问答 Prompt
 │   ├── generation.py         # 调用 OpenAI-compatible LLM
 │   ├── rag_service.py        # 编排完整 RAG 调用链
@@ -296,23 +299,37 @@ docker compose up --build -d
 
 ## PostgreSQL 与 pgvector 数据库
 
-本项目已提供 PostgreSQL + pgvector 数据库基础设施，但**默认不参与 RAG 请求**：
+本项目提供两种可选存储后端，通过 `VECTOR_STORE_BACKEND` 选择：
 
-- `VECTOR_STORE_BACKEND=memory` 是默认后端：现有 `DocumentRepository`（`documents.json`）和 `KnowledgeIndex`（NumPy 余弦相似度）继续负责上传、删除、检索和问答
-- `src/database/` 提供 SQLAlchemy 2.x engine、session、Declarative Base 和 `documents` / `chunks` ORM 模型；`chunks.embedding` 为 `VECTOR(384)`，与默认 Embedding 模型维度一致
-- Alembic 迁移在首次 `upgrade` 时启用 `vector` 扩展并创建两张表；应用启动**不会**自动执行迁移，数据库 schema 变更始终是显式运维动作
-- `PgVectorStore` 尚未实现，现有数据不会被迁移，API 响应结构不变
+- `VECTOR_STORE_BACKEND=memory` 是默认后端：现有 `DocumentRepository`（`documents.json`）和 `KnowledgeIndex`（NumPy 余弦相似度）继续负责上传、删除、检索和问答；**不读取 `DATABASE_URL`、不创建 engine、不连接 PostgreSQL**，即使 `db` 服务未启动也照常工作
+- `VECTOR_STORE_BACKEND=pgvector` 是已实现的 PostgreSQL 后端：文档元数据写入 `documents` 表，Chunk 文本与来源信息、`VECTOR(384)` Embedding 写入 `chunks` 表，检索在 PostgreSQL 内执行 pgvector 余弦相似度查询，不把全部向量加载进 Python 内存
 
-最小启动与迁移流程（详见 [docs/database.md](docs/database.md)）：
+pgvector 模式的行为要点：
+
+- 上传时只计算**新文档**的 Embedding，不重新切分、不重新编码历史文档
+- 应用重启后直接复用数据库里已保存的 Embedding，不重新计算
+- 原始上传文件仍保存在本地 `data/runtime/uploads/`（volume）
+- 删除文档时数据库行与 Chunk 通过 `ON DELETE CASCADE` 级联删除；删除使用**补偿式一致性机制**（内部 tombstone 文件），数据库与文件系统无法构成真正的 ACID 事务，失败时会在下次启动自动恢复或清理
+- `documents.json` 中的数据**不会**被自动迁移；memory 与 pgvector 的数据集彼此独立，切回 memory 即恢复原有 JSON 数据
+- 不创建 HNSW / IVFFlat 等 ANN 索引，不使用 BM25、Redis 或对象存储
+
+`pgvector` 模式启动时会检查数据库可连接、Alembic revision 与本地 head 一致、`vector` 扩展与 `documents` / `chunks` 表存在；本地 Alembic 配置或 migration 目录异常同样会被转换为稳定的 schema 就绪失败。**应用启动不会自动执行迁移**。数据库未就绪或 schema 未迁移时，应用仍能启动并响应 `/health`（`status="degraded"`），但 `/search`、`/ask` 与文档管理接口返回稳定的 503，不会泄露连接串、密码、文件路径或异常堆栈。
+
+启动与迁移流程（详见 [docs/database.md](docs/database.md)）：
 
 ```powershell
 # 启动数据库（仅 Compose 网络内可见，不映射宿主机端口）
 docker compose up -d db
 
-# 重建 backend 镜像以包含新依赖和迁移文件，然后执行迁移
+# 重建 backend 镜像以包含依赖与迁移文件，然后显式执行迁移
 docker compose build backend
 docker compose run --rm backend alembic upgrade head
+
+# 用 pgvector 模式启动 backend 与 frontend
+docker compose -f compose.yaml -f compose.pgvector.yaml up -d backend frontend
 ```
+
+`compose.pgvector.yaml` 只负责把 `VECTOR_STORE_BACKEND` 切换为 `pgvector` 并等待数据库健康，**不会覆盖** `DATABASE_URL`：连接串始终由基础 `compose.yaml` 从环境变量解析（默认 `postgresql+psycopg://course_rag:course_rag@db:5432/course_rag`）。如果自定义了 `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB`，请同步设置 `DATABASE_URL`。
 
 移除数据库并保留具名卷：
 
@@ -474,4 +491,4 @@ Top K 表示只保留分数最高的 K 条结果。本项目默认取 Top 3；�
 
 ## 当前范围之外
 
-当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新，另有一份离线的检索与拒答评估基准。数据库方面已提供 PostgreSQL + pgvector 的 schema、ORM 模型和 Alembic migration，但 `PgVectorStore` 尚未接入，上传、删除和检索仍走现有内存与 JSON 流程。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、对象存储、用户登录与多用户隔离、后台任务队列、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。评估只覆盖检索质量与拒答决策，生成答案质量与答案忠实度的评估也未实现。本地 JSON 与文件系统只是当前阶段的存储实现，没有声称支持生产级并发和扩展。
+当前 Web 应用已经支持单轮、带来源的课程知识问答、可配置相关性阈值、资料不足拒答、独立语义检索，以及 TXT、Markdown、文本型 PDF 的上传、列表、删除和即时索引更新，另有一份离线的检索与拒答评估基准。存储层支持两种后端：默认 `memory`（`documents.json` + `KnowledgeIndex`，不连接数据库）与 `pgvector`（PostgreSQL 持久化文档、Chunk 与 `VECTOR(384)` Embedding，数据库内余弦检索）；`pgvector` 模式不自动迁移 `documents.json`，不创建 HNSW / IVFFlat 索引，应用启动不自动执行 Alembic。扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、对象存储、用户登录与多用户隔离、后台任务队列、多轮记忆、流式输出、LangChain、LangGraph 与 Agent 仍未实现。评估只覆盖检索质量与拒答决策，生成答案质量与答案忠实度的评估也未实现。本地 JSON 与文件系统只是默认存储实现，没有声称支持生产级并发和扩展。

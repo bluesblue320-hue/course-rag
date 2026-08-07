@@ -112,6 +112,14 @@ class IngestionService:
     def max_upload_bytes(self) -> int:
         return self._max_upload_bytes
 
+    @property
+    def chunk_count(self) -> int:
+        """Return the number of chunks in the current index snapshot."""
+        return self._index.chunk_count
+
+    def close(self) -> None:
+        """No-op for the storage protocol; the JSON runtime owns no resources."""
+
     def list_documents(self) -> list[DocumentRecord]:
         """Return the built-in document followed by stored uploads."""
         return sort_documents(
