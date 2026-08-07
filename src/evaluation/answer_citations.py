@@ -15,7 +15,41 @@ from src.evaluation.answer_models import (
 )
 
 _VALID_CITATION = re.compile(r"\[来源([1-9]\d*)\]")
-_MALFORMED_LOOKALIKE = re.compile(r"\[[来源]*[^\[\]]*\]|【来源[^】]*】")
+# Source-like look-alikes only.  Ordinary Markdown bracket text such as
+# ``[FastAPI]``, ``[Python]``, or ``[1]`` is NOT a citation and must not be
+# reported as malformed.  Only fragments that explicitly start with the
+# source keyword (Chinese or English, case-insensitive) are candidates.
+_MALFORMED_LOOKALIKE = re.compile(
+    r"\[(?:来源|source)[^\[\]]*\]|【(?:来源|source)[^】]*】",
+    re.IGNORECASE,
+)
+
+# All source-like citation markup, valid or malformed, in either bracket
+# style.  Used to strip citation markup before lexical fact matching so that
+# ``[来源1]`` never contributes a fake phrase and removal never fuses the
+# surrounding text (the marker is replaced by a neutral separator).
+_CITATION_MARKUP = re.compile(
+    r"\[(?:来源|source)[^\[\]]*\]|【(?:来源|source)[^】]*】",
+    re.IGNORECASE,
+)
+_NEUTRAL_SEPARATOR = " | "
+
+
+def remove_citation_markup(answer: str) -> str:
+    """Return an answer copy with source-like citation markup neutralized.
+
+    Every source-like fragment (valid ``[来源N]`` and malformed look-alikes
+    such as ``[来源0]``, ``[来源A]``, ``[source1]``, ``【来源1】``) is
+    replaced by a neutral separator.  Ordinary Markdown bracket text such as
+    ``[FastAPI]`` or ``[Python]`` is left untouched.
+
+    The separator is used instead of an empty string so that
+    ``"Service[来源1]层"`` does not become ``"Service层"`` and create an
+    artificial phrase match after normalization.
+    """
+    if not isinstance(answer, str):
+        raise TypeError("待处理的答案必须是字符串")
+    return _CITATION_MARKUP.sub(_NEUTRAL_SEPARATOR, answer)
 
 
 def parse_citations(answer: str) -> CitationParseResult:

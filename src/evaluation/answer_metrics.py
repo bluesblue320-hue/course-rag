@@ -29,7 +29,7 @@ from src.evaluation.answer_models import (
     LatencySummary,
     RequiredFact,
 )
-from src.evaluation.answer_citations import CitationParseResult
+from src.evaluation.answer_citations import CitationParseResult, remove_citation_markup
 from src.evaluation.matching import normalize_text, text_matches_expectation
 from src.evaluation.models import EvaluationCase, EvidenceExpectation
 from src.exceptions import AnswerEvaluationError
@@ -183,11 +183,20 @@ def compute_case_metrics(
     response: AnswerResponse,
     citation_result: CitationParseResult,
 ) -> CaseAnswerMetrics:
-    """Compute every per-case metric from already-validated inputs."""
+    """Compute every per-case metric from already-validated inputs.
+
+    Citation metrics are computed from the raw answer and the parsed citation
+    result.  Annotated fact coverage and forbidden-phrase matching use a
+    separate copy of the answer with all source-like citation markup removed,
+    so ``[来源1]`` never contributes a fake phrase and its removal never fuses
+    surrounding text.
+    """
     occurrences = citation_result.valid_syntax
     valid_occurrence_count = len(occurrences)
     citation_occurrence_count = valid_occurrence_count
     malformed_count = len(citation_result.malformed_fragments)
+
+    matching_answer = remove_citation_markup(response.answer)
 
     legal_ranks = set(range(1, len(response.sources) + 1))
     invalid_numbers = sorted(
@@ -217,14 +226,17 @@ def compute_case_metrics(
         }
     )
 
-    forbidden_hits = forbidden_phrase_hits(annotation.forbidden_phrases, response.answer)
+    forbidden_hits = forbidden_phrase_hits(
+        annotation.forbidden_phrases,
+        matching_answer,
+    )
     contradiction_free = len(forbidden_hits) == 0
 
     fact_scorings: list[FactScoring] = []
     covered_count = 0
     grounded_count = 0
     for fact in annotation.required_facts:
-        covered, matched_phrase = fact_covered(fact, response.answer)
+        covered, matched_phrase = fact_covered(fact, matching_answer)
         if covered:
             covered_count += 1
         grounded, supporting_citations = fact_grounded_by_citation(

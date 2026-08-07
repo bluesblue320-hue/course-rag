@@ -5,6 +5,7 @@ import pytest
 from src.evaluation.answer_citations import (
     citation_numbers,
     parse_citations,
+    remove_citation_markup,
     unique_cited_sources,
 )
 
@@ -66,6 +67,28 @@ class TestParseCitations:
         assert result.valid_syntax == ()
         assert "[来源1, 来源2]" in result.malformed_fragments
 
+    def test_english_source_citation_is_malformed(self) -> None:
+        result = parse_citations("说明[source1]")
+        assert result.valid_syntax == ()
+        assert "[source1]" in result.malformed_fragments
+
+    def test_uppercase_source_citation_is_malformed(self) -> None:
+        result = parse_citations("说明[SOURCE1]")
+        assert result.valid_syntax == ()
+        assert "[SOURCE1]" in result.malformed_fragments
+
+    def test_regular_markdown_brackets_are_not_malformed(self) -> None:
+        for text in (
+            "[FastAPI]",
+            "[Python]",
+            "[1]",
+            "[abc]",
+            "[Service]",
+        ):
+            result = parse_citations(text)
+            assert result.valid_syntax == ()
+            assert result.malformed_fragments == (), f"{text!r} 被误报为 malformed"
+
     def test_out_of_range_number_is_still_valid_syntax(self) -> None:
         # Syntax validity and source-range validity are separate concerns:
         # the parser only checks the format, the metrics layer checks range.
@@ -98,16 +121,32 @@ class TestCitationHelpers:
         assert unique_cited_sources(result.valid_syntax) == (3, 1)
 
 
-class TestCitationsDoNotInterfereWithFactMatching:
-    def test_citation_text_is_not_part_of_fact_phrases(self) -> None:
-        from src.evaluation.answer_metrics import normalize_answer_text
+class TestRemoveCitationMarkup:
+    def test_valid_citation_is_removed(self) -> None:
+        assert remove_citation_markup("事实。[来源1]") == "事实。 | "
 
-        # The citation marker itself is normalized text, but fact phrases are
-        # matched against the whole answer; a phrase containing the citation
-        # marker must not be silently invented.
-        normalized = normalize_answer_text("答案是事实。[来源1]")
-        assert "来源1" in normalized
-        # The normalized form keeps the citation marker inside the answer, so
-        # a fact phrase that happens to include the marker could match; the
-        # parser itself never strips or rewrites answer text.
-        assert "事实.[来源1]" in normalized
+    def test_malformed_citations_are_removed(self) -> None:
+        for fragment in (
+            "[来源0]",
+            "[来源01]",
+            "[来源A]",
+            "[来源 1]",
+            "[source1]",
+            "【来源1】",
+        ):
+            assert fragment not in remove_citation_markup(f"正确。{fragment}"), fragment
+
+    def test_regular_markdown_brackets_are_kept(self) -> None:
+        for text in ("[FastAPI]", "[Python]", "[Service]", "[1]"):
+            assert text in remove_citation_markup(f"内容{text}内容"), text
+
+    def test_removal_uses_neutral_separator_to_avoid_fusion(self) -> None:
+        # Removing "[来源1]" must not fuse "Service" and "层" into
+        # "Service层", which would create an artificial phrase match.
+        cleaned = remove_citation_markup("Service[来源1]层")
+        assert "Service层" not in cleaned
+        assert "Service" in cleaned and "层" in cleaned
+
+    def test_rejects_non_string(self) -> None:
+        with pytest.raises(TypeError):
+            remove_citation_markup(123)  # type: ignore[arg-type]

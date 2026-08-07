@@ -167,7 +167,33 @@ class TestLoadAnswerResponses:
         path = _write_two_rows(tmp_path, row)
         with pytest.raises(AnswerResponseValidationError) as exc:
             load_answer_responses(path, cases)
-        assert "rank" in str(exc.value)
+        assert "连续递增" in str(exc.value)
+
+    def test_rank_gap_is_rejected(self, tmp_path: Path) -> None:
+        cases = _two_cases()
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1), _source(rank=3, text="另一个来源")],
+        )
+        path = _write_two_rows(tmp_path, row)
+        with pytest.raises(AnswerResponseValidationError) as exc:
+            load_answer_responses(path, cases)
+        assert "连续递增" in str(exc.value)
+
+    def test_later_rank_gap_is_rejected(self, tmp_path: Path) -> None:
+        cases = _two_cases()
+        row = _response_row(
+            "c-001",
+            sources=[
+                _source(rank=1),
+                _source(rank=2, text="第二个来源"),
+                _source(rank=4, text="第四个来源"),
+            ],
+        )
+        path = _write_two_rows(tmp_path, row)
+        with pytest.raises(AnswerResponseValidationError) as exc:
+            load_answer_responses(path, cases)
+        assert "连续递增" in str(exc.value)
 
     def test_duplicate_rank_is_rejected(self, tmp_path: Path) -> None:
         cases = _two_cases()
@@ -178,7 +204,7 @@ class TestLoadAnswerResponses:
         path = _write_two_rows(tmp_path, row)
         with pytest.raises(AnswerResponseValidationError) as exc:
             load_answer_responses(path, cases)
-        assert "rank 不得重复" in str(exc.value)
+        assert "连续递增" in str(exc.value)
 
     def test_bool_score_is_rejected(self, tmp_path: Path) -> None:
         cases = _two_cases()
@@ -273,3 +299,94 @@ class TestLoadAnswerResponses:
             f"{letter}:" in message
             for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         )
+
+
+class TestMaxRelevanceScoreSemantics:
+    def _single_case(self) -> tuple:
+        return (make_case("c-001", answerable=True),)
+
+    def _write_and_load(
+        self,
+        tmp_path: Path,
+        row: dict[str, object],
+    ) -> None:
+        path = _write(tmp_path / "responses.jsonl", [row])
+        load_answer_responses(path, self._single_case())
+
+    def test_no_reranker_equal_score_passes(self, tmp_path: Path) -> None:
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1, score=0.8), _source(rank=2, score=0.7, text="二")],
+            max_relevance_score=0.8,
+            reranker_applied=False,
+        )
+        self._write_and_load(tmp_path, row)
+
+    def test_no_reranker_greater_max_is_rejected(self, tmp_path: Path) -> None:
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1, score=0.8), _source(rank=2, score=0.7, text="二")],
+            max_relevance_score=0.9,
+            reranker_applied=False,
+        )
+        with pytest.raises(AnswerResponseValidationError) as exc:
+            self._write_and_load(tmp_path, row)
+        assert "必须与最高检索分数一致" in str(exc.value)
+
+    def test_reranker_applied_candidate_max_greater_passes(
+        self, tmp_path: Path
+    ) -> None:
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1, score=0.8), _source(rank=2, score=0.7, text="二")],
+            max_relevance_score=0.9,
+            reranker_applied=True,
+        )
+        self._write_and_load(tmp_path, row)
+
+    def test_reranker_applied_exact_equal_passes(self, tmp_path: Path) -> None:
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1, score=0.9), _source(rank=2, score=0.7, text="二")],
+            max_relevance_score=0.9,
+            reranker_applied=True,
+        )
+        self._write_and_load(tmp_path, row)
+
+    def test_reranker_applied_max_below_source_is_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1, score=0.9), _source(rank=2, score=0.7, text="二")],
+            max_relevance_score=0.8,
+            reranker_applied=True,
+        )
+        with pytest.raises(AnswerResponseValidationError) as exc:
+            self._write_and_load(tmp_path, row)
+        assert "不能低于" in str(exc.value)
+
+    def test_epsilon_difference_passes(self, tmp_path: Path) -> None:
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1, score=0.9000000001)],
+            max_relevance_score=0.9,
+            reranker_applied=False,
+        )
+        self._write_and_load(tmp_path, row)
+
+    def test_reranker_fallback_with_false_applied_uses_strict_rule(
+        self, tmp_path: Path
+    ) -> None:
+        # A fallback keeps the original vector order, so the final Top-K must
+        # contain the highest vector candidate and scores must match.
+        row = _response_row(
+            "c-001",
+            sources=[_source(rank=1, score=0.8)],
+            max_relevance_score=0.9,
+            reranker_applied=False,
+            reranker_fallback=True,
+        )
+        with pytest.raises(AnswerResponseValidationError) as exc:
+            self._write_and_load(tmp_path, row)
+        assert "必须与最高检索分数一致" in str(exc.value)

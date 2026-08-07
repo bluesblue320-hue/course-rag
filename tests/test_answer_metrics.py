@@ -425,6 +425,166 @@ class TestCaseMetrics:
         assert metrics.citation_validity_rate is None
 
 
+class TestCitationMarkupExcludedFromFactMatching:
+    def test_citation_markup_does_not_break_fact_coverage(self) -> None:
+        case = make_case(
+            "c-001",
+            answerable=True,
+            expected_evidence=(
+                make_expectation(document_id="doc-a", required_terms=("事实陈述",)),
+            ),
+        )
+        fact = RequiredFact(
+            fact_id="service-business",
+            accepted_phrases=("Service 层负责业务逻辑",),
+            supporting_evidence_indexes=(1,),
+        )
+        response = _response(
+            "Service 层负责业务逻辑。[来源1]",
+            sources=(
+                AnswerSource(
+                    rank=1,
+                    score=0.6,
+                    text="Service 层负责业务逻辑。",
+                    chunk_index=0,
+                    document_id="doc-a",
+                    filename="doc-a.md",
+                    page_number=None,
+                ),
+            ),
+        )
+        metrics = compute_case_metrics(
+            case,
+            _annotation(facts=(fact,)),
+            response,
+            parse_citations(response.answer),
+        )
+        assert metrics.covered_fact_count == 1
+        assert metrics.facts[0].covered
+
+    def test_citation_text_cannot_create_fact_coverage(self) -> None:
+        case = make_case(
+            "c-001",
+            answerable=True,
+            expected_evidence=(
+                make_expectation(document_id="doc-a", required_terms=("事实陈述",)),
+            ),
+        )
+        # The only occurrence of "来源1" comes from the citation markup
+        # itself, which must not count as fact coverage.
+        fact = RequiredFact(
+            fact_id="source-text",
+            accepted_phrases=("来源1",),
+            supporting_evidence_indexes=(1,),
+        )
+        response = _response("这里只有[来源1]")
+        metrics = compute_case_metrics(
+            case,
+            _annotation(facts=(fact,)),
+            response,
+            parse_citations(response.answer),
+        )
+        assert metrics.covered_fact_count == 0
+        assert not metrics.facts[0].covered
+
+    def test_citation_removal_does_not_fuse_surrounding_text(self) -> None:
+        case = make_case(
+            "c-001",
+            answerable=True,
+            expected_evidence=(
+                make_expectation(document_id="doc-a", required_terms=("Service层",)),
+            ),
+        )
+        # "Service[来源1]层" must not become "Service层" after stripping,
+        # so the fused phrase must not match.
+        fact = RequiredFact(
+            fact_id="fused",
+            accepted_phrases=("Service层",),
+            supporting_evidence_indexes=(1,),
+        )
+        response = _response("Service[来源1]层")
+        metrics = compute_case_metrics(
+            case,
+            _annotation(facts=(fact,)),
+            response,
+            parse_citations(response.answer),
+        )
+        assert metrics.covered_fact_count == 0
+        assert not metrics.facts[0].covered
+
+    def test_citation_markup_does_not_trigger_forbidden_phrase(self) -> None:
+        case = make_case(
+            "c-001",
+            answerable=True,
+            expected_evidence=(
+                make_expectation(document_id="doc-a", required_terms=("事实陈述",)),
+            ),
+        )
+        response = _response("正确内容。[来源1]")
+        metrics = compute_case_metrics(
+            case,
+            _annotation(forbidden=("来源1",)),
+            response,
+            parse_citations(response.answer),
+        )
+        assert metrics.forbidden_phrase_hits == ()
+        assert metrics.contradiction_free
+
+    def test_regular_markdown_brackets_survive_stripping(self) -> None:
+        case = make_case(
+            "c-001",
+            answerable=True,
+            expected_evidence=(
+                make_expectation(document_id="doc-a", required_terms=("事实陈述",)),
+            ),
+        )
+        # Ordinary Markdown bracket text is not citation markup and must be
+        # preserved, so a phrase containing it can still match.
+        fact = RequiredFact(
+            fact_id="python-bracket",
+            accepted_phrases=("[Python]",),
+            supporting_evidence_indexes=(1,),
+        )
+        response = _response("正确内容。[Python]")
+        metrics = compute_case_metrics(
+            case,
+            _annotation(facts=(fact,)),
+            response,
+            parse_citations(response.answer),
+        )
+        assert metrics.covered_fact_count == 1
+        assert metrics.facts[0].covered
+
+    def test_malformed_citation_markup_does_not_participate_in_matching(
+        self,
+    ) -> None:
+        case = make_case(
+            "c-001",
+            answerable=True,
+            expected_evidence=(
+                make_expectation(document_id="doc-a", required_terms=("事实陈述",)),
+            ),
+        )
+        fact = RequiredFact(
+            fact_id="malformed-text",
+            accepted_phrases=("来源 1",),
+            supporting_evidence_indexes=(1,),
+        )
+        # The malformed "[来源 1]" is stripped before matching, so a phrase
+        # built only from its text cannot produce coverage.
+        response = _response("正确内容。[来源 1]")
+        result = parse_citations(response.answer)
+        assert len(result.malformed_fragments) == 1
+        metrics = compute_case_metrics(
+            case,
+            _annotation(facts=(fact,)),
+            response,
+            result,
+        )
+        assert metrics.covered_fact_count == 0
+        assert not metrics.facts[0].covered
+
+
 class TestDecisionMetrics:
     def test_true_answer(self) -> None:
         case = make_case("c-001", answerable=True)

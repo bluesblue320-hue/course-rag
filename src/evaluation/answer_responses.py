@@ -41,6 +41,9 @@ _REQUIRED_SOURCE_FIELDS = (
     "page_number",
 )
 
+# Tolerance when comparing max_relevance_score against source scores.
+_SCORE_EPSILON = 1e-9
+
 
 def _fail(line_number: int, message: str) -> AnswerResponseValidationError:
     return AnswerResponseValidationError(f"回答结果文件第 {line_number} 行: {message}")
@@ -154,12 +157,22 @@ def _parse_response(
     sources = tuple(_parse_source(item, line_number) for item in raw_sources)
 
     ranks = [source.rank for source in sources]
-    if len(set(ranks)) != len(ranks):
-        raise _fail(line_number, "sources 的 rank 不得重复")
-    if ranks != sorted(ranks):
-        raise _fail(line_number, "sources 的 rank 必须按升序排列")
-    if sources and ranks[0] != 1:
-        raise _fail(line_number, "sources 的 rank 必须从 1 开始")
+    expected_ranks = list(range(1, len(sources) + 1))
+    if ranks != expected_ranks:
+        raise _fail(
+            line_number,
+            "sources 的 rank 必须从 1 开始连续递增",
+        )
+
+    # Reranker flags must be validated before the max-score comparison below:
+    # they decide which score rule applies, and coercing with bool() would
+    # silently accept 1 / "false" / [].
+    reranker_applied = raw["reranker_applied"]
+    if not isinstance(reranker_applied, bool):
+        raise _fail(line_number, "reranker_applied 必须是真正的布尔值")
+    reranker_fallback = raw["reranker_fallback"]
+    if not isinstance(reranker_fallback, bool):
+        raise _fail(line_number, "reranker_fallback 必须是真正的布尔值")
 
     max_relevance_score = raw["max_relevance_score"]
     if max_relevance_score is not None:
@@ -171,12 +184,27 @@ def _parse_response(
             maximum=1.0,
         )
         if sources:
-            top_score = max(source.score for source in sources)
-            if abs(parsed_max_score - top_score) > 1e-9:
-                raise _fail(
-                    line_number,
-                    "max_relevance_score 必须与最高检索分数一致",
-                )
+            top_returned_score = max(source.score for source in sources)
+            if reranker_applied:
+                # The reranker may move the highest vector candidate out of
+                # the final Top-K, so max_relevance_score (the candidate-pool
+                # maximum, the refusal decision basis) may exceed the highest
+                # returned source score.  It must never fall below any
+                # returned source's retrieval score.
+                if parsed_max_score + _SCORE_EPSILON < top_returned_score:
+                    raise _fail(
+                        line_number,
+                        "max_relevance_score 不能低于任何最终来源的检索分数",
+                    )
+            else:
+                # Without reranking (or when the reranker fell back and kept
+                # the original vector order), the final Top-K contains the
+                # highest vector candidate, so the scores must match.
+                if abs(parsed_max_score - top_returned_score) > _SCORE_EPSILON:
+                    raise _fail(
+                        line_number,
+                        "max_relevance_score 必须与最高检索分数一致",
+                    )
     elif sources:
         raise _fail(line_number, "有 sources 时 max_relevance_score 不允许为 null")
 
@@ -206,13 +234,6 @@ def _parse_response(
         "total_elapsed_ms",
         minimum=0.0,
     )
-
-    reranker_applied = raw["reranker_applied"]
-    if not isinstance(reranker_applied, bool):
-        raise _fail(line_number, "reranker_applied 必须是真正的布尔值")
-    reranker_fallback = raw["reranker_fallback"]
-    if not isinstance(reranker_fallback, bool):
-        raise _fail(line_number, "reranker_fallback 必须是真正的布尔值")
 
     return AnswerResponse(
         case_id=case_id.strip(),
