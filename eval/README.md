@@ -8,7 +8,9 @@
 3. 资料外的问题有多少被错误放行。
 4. 仓库默认对比阈值 `0.35` 在这份受控基准上是否合理，换成多少更好。
 
-评估**只测检索质量和回答/拒答决策**。它不调用 LLM，不评估生成答案的质量，也不评估答案忠实度。
+检索评估**只测检索质量和回答/拒答决策**，不调用 LLM。回答质量评估（见
+[`docs/answer-evaluation.md`](../docs/answer-evaluation.md)）基于人工标注事实与引用，
+是**确定性检查**，同样不调用 LLM；它不等同于完整忠实度检测，也不使用 LLM Judge。
 
 ---
 
@@ -22,14 +24,18 @@ eval/
 │   ├── backend-architecture.md
 │   ├── rag-fundamentals.md
 │   └── database-basics.md
-└── dataset.jsonl           60 道带标注问题，每行一个 JSON 对象
+├── dataset.jsonl           60 道带标注问题，每行一个 JSON 对象
+└── answer_annotations.jsonl  60 题回答质量标注：必要事实、接受短语、来源映射、矛盾短语
 ```
 
 配套代码在仓库其他位置：
 
 ```text
 src/evaluation/     评估库（models / dataset / corpus / matching / metrics / threshold / runner / report）
-scripts/evaluate_rag.py  命令行入口
+                    回答质量评估（answer_models / answer_annotations / answer_responses /
+                    answer_citations / answer_metrics / answer_runner / answer_report）
+scripts/evaluate_rag.py  检索与拒答评估命令行入口
+scripts/evaluate_answers.py  回答质量评估命令行入口
 reports/baseline/   已提交的基线快照，用于回归对比
 reports/generated/  本地临时输出（已 gitignore）
 ```
@@ -273,7 +279,13 @@ python -m scripts.evaluate_rag --output-dir reports/generated
 
 - 语料是受控基准，规模有限，不代表所有真实用户文档。
 - 第一版 60 题，指标存在抽样波动，小数点后第二位不要过度解读。
-- 不评估生成答案质量，也不评估答案忠实度。Hit@5 高不代表最终答案一定正确。
+- 检索评估不评估生成答案质量，也不评估答案忠实度。Hit@5 高不代表最终答案一定正确。
+- 回答质量评估是**标注级确定性检查**：它检查已标注的必要事实、引用编号、来源支持与已知
+  矛盾短语，不是完整语义正确性证明，不能发现所有幻觉，也不等同于人工评审或 LLM Judge。
+- `reference_answer` 只用于人工审计，不参与语义相似度评分；不使用 BLEU/ROUGE 或字符串
+  相似度冒充事实正确性。
+- 来源支持只针对已标注的 `required_facts` 判断；V1 使用答案级引用集合，不做句子级
+  claim-to-citation 对齐。
 - 索引只有 25 个 Chunk，Top-5 覆盖了 20% 的语料，Hit@5 会偏乐观。
 - 错误放行与错误拒答的权重是业务选择，不是通用标准。
 - `page_number` 匹配逻辑写了但当前语料全是 Markdown，实际没有被覆盖到真实页码场景。
@@ -288,6 +300,14 @@ python -m scripts.evaluate_rag --output-dir reports/generated
 ```bash
 pytest tests/test_evaluation_*.py -q
 ```
+
+### 回答质量评估
+
+回答质量评估使用 `eval/answer_annotations.jsonl`（60 题全覆盖），入口为
+`python -m scripts.evaluate_answers`。离线模式评分已有回答结果文件，不加载模型、
+不调用 LLM；`--live` 模式必须显式传入才会调用真实 Embedding 与 LLM。
+CI 只使用 `tests/fixtures/answer_evaluation/` 的确定性 Fixture 运行离线 smoke test。
+详见 [`docs/answer-evaluation.md`](../docs/answer-evaluation.md)。
 
 ---
 

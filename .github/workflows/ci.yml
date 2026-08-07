@@ -98,6 +98,54 @@ jobs:
       - name: Backend tests
         run: python -m pytest -q --ignore=tests/integration
 
+      # Deterministic answer-quality smoke test.  This runs the offline
+      # responses mode against a small committed fixture: it never loads an
+      # embedding model, never calls an LLM, never touches the network or
+      # PostgreSQL, and never loads a real reranker.  The environment keeps
+      # LLM_* empty and HF offline, so any accidental model or network use
+      # fails fast.
+      - name: Deterministic answer evaluation smoke test
+        run: |
+          python -m scripts.evaluate_answers \
+            --dataset tests/fixtures/answer_evaluation/dataset.jsonl \
+            --annotations tests/fixtures/answer_evaluation/annotations.jsonl \
+            --responses tests/fixtures/answer_evaluation/responses.jsonl \
+            --output-dir /tmp/answer-quality-evaluation \
+            --run-name ci-fixture \
+            --model-label deterministic-fixture
+
+          test -s /tmp/answer-quality-evaluation/summary.json
+          test -s /tmp/answer-quality-evaluation/cases.jsonl
+          test -s /tmp/answer-quality-evaluation/report.md
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("/tmp/answer-quality-evaluation")
+          summary = json.loads(
+              (root / "summary.json").read_text(encoding="utf-8")
+          )
+
+          assert summary["evaluation_type"] == "answer_quality"
+          assert summary["dataset_counts"]["total"] > 0
+
+          case_lines = [
+              line
+              for line in (root / "cases.jsonl")
+              .read_text(encoding="utf-8")
+              .splitlines()
+              if line.strip()
+          ]
+          assert len(case_lines) == summary["dataset_counts"]["total"]
+          for line in case_lines:
+              json.loads(line)
+
+          report = (root / "report.md").read_text(encoding="utf-8")
+          assert "方法限制" in report
+          assert "strict" in report.lower() or "严格" in report
+          PY
+
       - name: Docker Compose config check
         run: docker compose config --quiet
 
