@@ -37,13 +37,15 @@
 - 提供离线检索与拒答评估基准：受控语料、60 题标注数据集和可复现的评估脚本
 - 通过 `python -m scripts.evaluate_rag` 输出 Hit@K、Recall@K、MRR 与回答/拒答混淆矩阵
 - 在 calibration split 上扫描相似度阈值并给出确定性的推荐值，不自动改写生产配置
+- 提供基于人工标注事实与引用的确定性回答质量评估：`python -m scripts.evaluate_answers` 离线评分已有回答，或显式 `--live` 调用生产 RAG 管线
+- 回答评估覆盖标注事实覆盖率、来源支持引用覆盖率、`[来源N]` 引用合法率、已知矛盾短语检测与严格标注通过率；真实 LLM 评估必须显式使用 `--live`，CI 只使用确定性 Fixture
 - 提供 FastAPI、Vue 构建、Nginx 反向代理、具名卷和健康检查组成的 Docker Compose 一键启动方案
 - 提供 PostgreSQL + pgvector 存储后端：`VECTOR_STORE_BACKEND=pgvector` 时由 PostgreSQL 持久化文档元数据、Chunk 文本与 `VECTOR(384)` Embedding，检索在数据库内执行余弦相似度查询
 - `VECTOR_STORE_BACKEND=memory` 仍是默认后端：现有 `documents.json` 与内存 `KnowledgeIndex` 继续负责上传、删除、检索和问答，完全不连接 PostgreSQL
 
 ## 当前没有实现
 
-本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、BM25 或混合检索。PostgreSQL + pgvector 后端已经可用，但默认仍使用内存索引和 JSON 元数据；`pgvector` 模式不会自动迁移 `documents.json` 中的历史数据，也不会创建 HNSW / IVFFlat 等 ANN 索引。评估只覆盖检索质量与拒答决策，不评估生成答案的质量，也不评估答案忠实度。本地 JSON 和文件系统只是默认实现，不代表生产级存储方案。
+本项目仍不支持扫描 PDF 的 OCR、图片识别、Word、PowerPoint、Excel、网页抓取、URL 导入、对象存储、用户登录与多用户隔离、后台任务队列、流式输出、多轮记忆、LangChain、LangGraph、BM25 或混合检索。PostgreSQL + pgvector 后端已经可用，但默认仍使用内存索引和 JSON 元数据；`pgvector` 模式不会自动迁移 `documents.json` 中的历史数据，也不会创建 HNSW / IVFFlat 等 ANN 索引。现有评估覆盖检索质量、拒答决策，以及基于人工标注事实与引用的回答质量；回答评估是标注级确定性检查，不是完整忠实度检测，不使用 LLM Judge，不会自动修改 Prompt 或阈值，真实 LLM 评估必须显式使用 `--live`，CI 只运行确定性 Fixture。本地 JSON 和文件系统只是默认实现，不代表生产级存储方案。
 
 ## 项目目录
 
@@ -73,15 +75,17 @@ course-rag/
 │   ├── rag_service.py        # 编排完整 RAG 调用链
 │   ├── exceptions.py         # RAG 与文档领域异常
 │   ├── database/             # PostgreSQL + pgvector 基础设施（配置、engine、ORM 模型）
-│   ├── evaluation/           # 离线评估库（数据集、语料、指标、阈值、报告）
+│   ├── evaluation/           # 离线评估库（数据集、语料、指标、阈值、报告、回答质量评估）
 │   └── main.py               # 命令行入口
 ├── eval/                     # 评估基准：受控语料、清单与标注数据集
 │   ├── README.md             # 评估设计、指标定义与使用说明
 │   ├── corpus_manifest.json  # 语料清单
 │   ├── corpus/               # 3 份原创 Markdown 语料
-│   └── dataset.jsonl         # 60 道带标注问题
+│   ├── dataset.jsonl         # 60 道带标注问题
+│   └── answer_annotations.jsonl  # 60 题回答质量标注（事实、引用、矛盾短语）
 ├── scripts/
-│   └── evaluate_rag.py       # 评估命令行入口
+│   ├── evaluate_rag.py       # 检索与拒答评估命令行入口
+│   └── evaluate_answers.py   # 回答质量评估命令行入口
 ├── reports/
 │   ├── baseline/             # 已提交的基线报告快照
 │   └── generated/            # 本地评估输出（不进入 Git）
@@ -93,6 +97,7 @@ course-rag/
 │   └── README.md             # 前端运行与学习说明
 ├── docs/docker.md            # Docker Compose 使用、持久化测试与排障
 ├── docs/database.md          # PostgreSQL + pgvector 数据库基础设施指南
+├── docs/answer-evaluation.md # 回答质量评估框架：Schema、指标、命令、限制
 ├── Dockerfile                # FastAPI CPU 运行镜像
 ├── compose.yaml              # 本地完整应用编排和具名卷
 ├── alembic.ini               # Alembic 迁移配置
@@ -380,6 +385,48 @@ python -m scripts.evaluate_rag
 推荐阈值**不会**自动写入生产配置，是否采纳是独立决策。指标定义、标注规则、阈值权重的业务取舍和已知限制都写在 [`eval/README.md`](eval/README.md)。
 
 补充两点：`0.35` 只是仓库代码里的拒答默认值，仅作报告对比基准，不一定等于部署环境实际生效的阈值（部署值可能由 `RAG_MIN_RELEVANCE_SCORE` 覆盖）；test split 的结果已随本仓库公开，之后更适合作为回归基准，不再是未来完全未见的最终 holdout，正式横评需要另取一个新留出集。
+
+### 回答质量评估
+
+除了检索与拒答评估，本仓库还提供基于人工标注事实和引用的**确定性回答质量评估**。
+它检查最终答案是否覆盖标注的必要事实、引用编号是否合法、被引用来源是否支持标注事实、
+答案是否包含已知矛盾短语，并给出严格标注通过率。`reference_answer` 只用于人工审计，
+不参与语义相似度评分；不使用 BLEU/ROUGE、不使用 LLM Judge；这是标注级检查，不是完整
+忠实度检测。
+
+离线评分已有回答结果文件（不加载模型、不调用 LLM、完全确定性）：
+
+```powershell
+python -m scripts.evaluate_answers `
+  --dataset eval/dataset.jsonl `
+  --annotations eval/answer_annotations.jsonl `
+  --responses <path\to\responses.jsonl> `
+  --output-dir reports/generated/answer-quality `
+  --run-name my-run --model-label my-model
+```
+
+显式 live 生成（真实 Embedding + LLM，必须显式 `--live`，不会无意触发）：
+
+```powershell
+python -m scripts.evaluate_answers --live `
+  --manifest eval/corpus_manifest.json `
+  --dataset eval/dataset.jsonl `
+  --annotations eval/answer_annotations.jsonl `
+  --output-dir reports/generated/answer-quality/manual-live `
+  --run-name manual-live --model-label local-configured-model `
+  --top-k 3 --threshold 0.35
+```
+
+CI 只使用 `tests/fixtures/answer_evaluation/` 的确定性 Fixture 运行离线 smoke test，
+**不会**调用真实 LLM、不会下载 Embedding 模型、不会加载真实 Reranker。
+
+回答评估的解析规则要点：严格引用格式只有 `[来源N]`；普通 Markdown 方括号（如
+`[FastAPI]`、`[Python]`、`[1]`）不是引用，不会被当作 malformed citation；引用标记不参与
+标注事实与矛盾短语的匹配；`sources` 的 rank 必须从 1 开始连续；启用 Reranker 时
+`max_relevance_score`（拒答依据）允许高于最终返回来源的最高检索分数；离线报告只记录
+仓库相对路径或文件名，不包含本地绝对路径。
+
+指标定义、标注 Schema、strict_pass 规则与限制详见 [`docs/answer-evaluation.md`](docs/answer-evaluation.md)。
 
 ## 可选 Reranker
 
