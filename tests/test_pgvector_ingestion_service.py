@@ -483,6 +483,87 @@ class TestTombstoneReconcile:
         assert malformed.is_file()
         assert malformed.read_bytes() == b"precious"
         assert "人工检查" in caplog.text
+        assert str(tmp_path) not in caplog.text
+        assert "Traceback" not in caplog.text
+
+    def test_normal_upload_files_are_ignored_without_warning(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class FailingOnGetStore(FakeStore):
+            def get_document(
+                self,
+                document_id: str,
+            ) -> DocumentRecord | None:
+                raise AssertionError("普通上传文件不应触发数据库查询")
+
+        store = FailingOnGetStore()
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        files = {
+            "a" * 32 + ".txt": b"normal txt",
+            "b" * 32 + ".md": b"normal markdown",
+            "c" * 32 + ".pdf": b"normal pdf",
+        }
+        for filename, content in files.items():
+            (upload_dir / filename).write_bytes(content)
+
+        with caplog.at_level(logging.WARNING):
+            service.reconcile_tombstones()
+
+        for filename, content in files.items():
+            path = upload_dir / filename
+            assert path.is_file()
+            assert path.read_bytes() == content
+        assert caplog.text == ""
+
+    def test_mixed_directory_reconcile(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class RecordingStore(FakeStore):
+            def __init__(self) -> None:
+                super().__init__()
+                self.get_document_calls: list[str] = []
+
+            def get_document(
+                self,
+                document_id: str,
+            ) -> DocumentRecord | None:
+                self.get_document_calls.append(document_id)
+                return super().get_document(document_id)
+
+        store = RecordingStore()
+        service, upload_dir, _ = make_service(tmp_path, store=store)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        # A regular upload, a malformed tombstone, and a valid tombstone
+        # whose database record no longer exists.
+        normal = upload_dir / ("a" * 32 + ".txt")
+        normal.write_bytes(b"normal")
+        malformed = upload_dir / ".tombstone-aaaa.tmp"
+        malformed.write_bytes(b"bad")
+        stale_document_id = "d" * 32
+        stale_stored = "d" * 32 + ".txt"
+        stale = upload_dir / make_tombstone_name(stale_document_id, stale_stored)
+        stale.write_bytes(b"stale")
+
+        with caplog.at_level(logging.WARNING):
+            service.reconcile_tombstones()
+
+        # The regular upload is untouched and never queried.
+        assert normal.read_bytes() == b"normal"
+        # The malformed tombstone is preserved with one fixed warning.
+        assert malformed.is_file()
+        assert malformed.read_bytes() == b"bad"
+        assert caplog.text.count("人工检查") == 1
+        # The stale valid tombstone is removed after its database lookup.
+        assert not stale.exists()
+        # Only the valid tombstone's document id was queried.
+        assert store.get_document_calls == [stale_document_id]
 
     def test_record_exists_and_file_missing_restores(
         self, tmp_path: Path

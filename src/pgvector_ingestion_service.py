@@ -153,6 +153,10 @@ class PgVectorIngestionService:
         * malformed or inconsistent tombstones are kept for manual
           inspection.
 
+        Regular uploaded files (which never start with the tombstone
+        prefix) are ignored entirely: no parsing, no database lookup, no
+        warnings, and no file mutations.
+
         Failures are logged with fixed messages (never with file paths or
         exception traces) and never block application startup.
         """
@@ -162,6 +166,12 @@ class PgVectorIngestionService:
             self._upload_dir.iterdir(),
             key=lambda path: path.name,
         ):
+            # Regular uploaded files never begin with the tombstone prefix
+            # and must be skipped entirely: no parsing, no database lookup,
+            # no warnings, and no file mutations.
+            if not candidate.name.startswith(_TOMBSTONE_PREFIX):
+                continue
+
             parsed = _parse_tombstone_name(candidate)
             if parsed is None:
                 logger.warning(
