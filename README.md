@@ -42,6 +42,7 @@
 - 提供 FastAPI、Vue 构建、Nginx 反向代理、具名卷和健康检查组成的 Docker Compose 一键启动方案
 - 提供 PostgreSQL + pgvector 存储后端：`VECTOR_STORE_BACKEND=pgvector` 时由 PostgreSQL 持久化文档元数据、Chunk 文本与 `VECTOR(384)` Embedding，检索在数据库内执行余弦相似度查询
 - `VECTOR_STORE_BACKEND=memory` 仍是默认后端：现有 `documents.json` 与内存 `KnowledgeIndex` 继续负责上传、删除、检索和问答，完全不连接 PostgreSQL
+- 提供 production-oriented single-host 部署：Docker Compose 三文件组合、PostgreSQL + pgvector、Caddy 自动 HTTPS、仅暴露 80/443、具名卷持久化、一次性 Alembic 迁移服务，详见 [docs/deployment.md](docs/deployment.md)
 
 ## 当前没有实现
 
@@ -98,8 +99,13 @@ course-rag/
 ├── docs/docker.md            # Docker Compose 使用、持久化测试与排障
 ├── docs/database.md          # PostgreSQL + pgvector 数据库基础设施指南
 ├── docs/answer-evaluation.md # 回答质量评估框架：Schema、指标、命令、限制
+├── docs/deployment.md        # Production 单机部署：Caddy HTTPS、迁移、备份与排障
 ├── Dockerfile                # FastAPI CPU 运行镜像
 ├── compose.yaml              # 本地完整应用编排和具名卷
+├── compose.pgvector.yaml     # pgvector 运行时 override
+├── compose.prod.yaml         # production 加固 + Caddy + 迁移服务 override
+├── deploy/Caddyfile          # Production Caddy 反向代理配置（自动 HTTPS）
+├── .env.production.example   # Production 环境变量模板（真实配置用 .env.production）
 ├── alembic.ini               # Alembic 迁移配置
 ├── migrations/               # Alembic 迁移环境与 schema 版本
 ├── requirements.txt          # Python 依赖
@@ -301,6 +307,30 @@ docker compose up --build -d
 默认访问 `http://127.0.0.1:8080`，FastAPI 继续通过 `/api/*` 访问。上传文件与文档元数据保存在 `course-rag-runtime` 具名卷，Hugging Face 模型缓存在 `course-rag-huggingface-cache` 具名卷。
 
 完整配置、健康检查、停止/重启、数据卷说明和自动化重建持久化测试见 [Docker Compose 使用指南](docs/docker.md)。
+
+## Production Deployment
+
+面向单台 Linux VPS 的 production-oriented single-host 部署：
+
+- Docker Compose 三文件组合：`compose.yaml` + `compose.pgvector.yaml` + `compose.prod.yaml`
+- 存储后端固定为 **PostgreSQL + pgvector**（生产不使用 memory backend）
+- **Caddy 自动 HTTPS**：自动签发与续期证书、HTTP 自动跳转 HTTPS，是唯一公网入口
+- 仅暴露公网端口 `80` / `443`；PostgreSQL `5432`、FastAPI `8000`、前端 `8080` 一律不发布
+- 具名卷持久化：PostgreSQL 数据、上传原始文档（RAG runtime）、Hugging Face 模型缓存、Caddy 证书与 ACME 状态
+- 一次性 Alembic 迁移服务，迁移成功前 backend 不会启动
+- 完整部署指南（DNS、防火墙、备份、升级、排障）见 [docs/deployment.md](docs/deployment.md)
+
+快速开始：
+
+```bash
+cp .env.production.example .env.production
+# 编辑 DOMAIN / POSTGRES_PASSWORD / DATABASE_URL / LLM 配置
+docker compose --env-file .env.production \
+  -f compose.yaml -f compose.pgvector.yaml -f compose.prod.yaml \
+  up -d --build
+```
+
+注意：这是 single-host production-style 部署，不是 multi-tenant SaaS；应用当前没有用户认证、访问限流与多用户隔离，公网演示请使用低额度 API key（详见部署文档的安全警告）。
 
 ## PostgreSQL 与 pgvector 数据库
 

@@ -27,6 +27,7 @@ models/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Editors and operating systems
 .idea/

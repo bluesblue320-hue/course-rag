@@ -32,6 +32,21 @@ Compose 启动三个服务：
 
 后端只在 Compose 内部网络暴露 `8000`，浏览器继续使用现有 `/api/*` 路径。Nginx 转发时移除 `/api` 前缀，因此 FastAPI 的 `/health`、`/search`、`/ask` 和 `/documents` 路径均保持不变。`db` 服务默认是**准备好的基础设施**：基础 `compose.yaml` 保持 `VECTOR_STORE_BACKEND=memory`，后端不连接数据库，`db` 未启动也不影响后端运行。需要让后端真正使用 PostgreSQL + pgvector 时，使用 `compose.pgvector.yaml` override 启动（见下文）。
 
+## 本地开发 vs 生产部署
+
+| | 本地开发（本文档） | 生产部署（[deployment.md](deployment.md)） |
+| --- | --- | --- |
+| Compose 文件 | `compose.yaml`（可选 + `compose.pgvector.yaml`） | `compose.yaml` + `compose.pgvector.yaml` + `compose.prod.yaml` |
+| 环境文件 | `.env`（来自 `.env.example`） | `.env.production`（来自 `.env.production.example`） |
+| 存储后端 | 默认 memory，可选 pgvector | **必须 pgvector** |
+| 入口 | frontend Nginx，`localhost:8080` | Caddy，域名 `80/443` 自动 HTTPS |
+| `/api/*` 路由 | frontend Nginx → backend | Caddy → backend（Caddy 提前截获，Nginx 不再处理） |
+| 必须配置 | 无（LLM/RAG 均可选） | `DOMAIN`、`POSTGRES_PASSWORD`、`DATABASE_URL`、LLM 配置，缺失时 Compose 直接拒绝启动 |
+| 端口 | `8080` 发布；db/backend 不发布 | 仅 Caddy `80/443`；`5432`/`8000`/`8080` 一律不发布 |
+| 迁移 | `docker compose run --rm backend alembic upgrade head` | 一次性 `migrate` 服务；升级时 `docker compose run --rm migrate` |
+
+不要把 `.env.production` 用于本地开发，也不要把 `.env` 当作生产配置：两者要求的变量、端口与安全默认值完全不同。
+
 ## pgvector override 启动方式
 
 基础 `compose.yaml` 的 backend 不依赖 `db`，memory 模式无需数据库。要切换到 PostgreSQL + pgvector 存储后端：
@@ -314,5 +329,7 @@ docker compose down
 ## 当前部署边界
 
 这是本地演示和后续单机云部署的基础方案，不包含 TLS、身份认证、对象存储、多副本共享存储、GPU、Kubernetes 或自动化发布。后端不向宿主机发布端口、容器以非 root 用户运行并启用 `no-new-privileges`，密钥只通过 `.env` 注入、不写入镜像。具名卷属于当前 Docker 主机；迁移到另一台主机前需要单独备份。云部署阶段还应在外层补充 HTTPS、密钥管理和访问控制。
+
+**生产单机部署**（Caddy 自动 HTTPS、pgvector 强制、端口隔离、一次性迁移服务、持久化与备份说明）见 [deployment.md](deployment.md)。生产环境使用 `compose.prod.yaml`，不要把本地 `compose.yaml` 直接当成生产配置。
 
 数据库服务同样是基础设施边界：默认 `memory` 后端不使用数据库，`db` 不映射宿主机端口、不带密码之外的认证加固、不做备份。`pgvector` 后端已可用，但仅在显式使用 `compose.pgvector.yaml` 时接管存储；本方案不提供生产级多租户隔离、高并发保证、水平扩展、ANN 索引、云对象存储或自动数据迁移。数据库 readiness 由 `compose.pgvector.yaml` 的 `depends_on` 与后端自身的 schema 检查共同保证。
