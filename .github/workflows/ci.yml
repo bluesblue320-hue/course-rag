@@ -184,6 +184,189 @@ jobs:
           print("custom DATABASE_URL preserved:", environment["DATABASE_URL"])
           PY
 
+      # Renders the full production stack (compose.yaml + pgvector override +
+      # production override) with fake values and asserts port isolation,
+      # the pgvector backend, persistent volumes, restart policies, startup
+      # dependencies, log rotation, and the one-shot migration service.
+      # No container is started and no real secret is used.
+      - name: Production Compose config check
+        run: |
+          cat > /tmp/course-rag-prod-ci.env <<'ENV'
+          DOMAIN=rag.example.com
+          POSTGRES_DB=course_rag
+          POSTGRES_USER=course_rag
+          POSTGRES_PASSWORD=ci-only-placeholder
+          DATABASE_URL=postgresql+psycopg://course_rag:ci-only-placeholder@db:5432/course_rag
+          LLM_API_KEY=ci-placeholder
+          LLM_BASE_URL=https://llm.example.invalid/v1
+          LLM_MODEL=ci-placeholder
+          LLM_TIMEOUT_SECONDS=30
+          RAG_MIN_RELEVANCE_SCORE=0.35
+          MAX_UPLOAD_BYTES=10485760
+          RAG_RERANKER_ENABLED=false
+          RAG_RERANKER_MODEL=
+          RAG_RERANKER_CANDIDATE_TOP_K=15
+          ENV
+          docker compose \
+            --env-file /tmp/course-rag-prod-ci.env \
+            -f compose.yaml \
+            -f compose.pgvector.yaml \
+            -f compose.prod.yaml \
+            config --quiet
+          docker compose \
+            --env-file /tmp/course-rag-prod-ci.env \
+            -f compose.yaml \
+            -f compose.pgvector.yaml \
+            -f compose.prod.yaml \
+            config --format json \
+            > /tmp/course-rag-prod-compose.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(
+              Path("/tmp/course-rag-prod-compose.json").read_text(encoding="utf-8")
+          )
+          services = config["services"]
+
+          assert set(services) == {"db", "migrate", "backend", "frontend", "caddy"}
+
+          def published(name):
+              return list(services[name].get("ports", []))
+
+          def published_port(entry):
+              if isinstance(entry, dict):
+                  return str(entry["published"]), entry.get("protocol", "tcp")
+              if isinstance(entry, str):
+                  value, _, protocol = entry.partition("/")
+                  return value.rsplit(":", 1)[-1], protocol or "tcp"
+              raise TypeError(entry)
+
+          # Port isolation: only Caddy publishes host ports.
+          for name in ("db", "migrate", "backend", "frontend"):
+              assert published(name) == [], f"{name} must not publish host ports: {published(name)}"
+          caddy_ports = published("caddy")
+          tcp = {published_port(e) for e in caddy_ports if published_port(e)[1] == "tcp"}
+          udp = {published_port(e) for e in caddy_ports if published_port(e)[1] == "udp"}
+          assert tcp == {("80", "tcp"), ("443", "tcp")}, caddy_ports
+          assert udp == {("443", "udp")}, caddy_ports
+
+          # Backend must use pgvector with the operator-provided DATABASE_URL.
+          backend_env = services["backend"]["environment"]
+          assert backend_env["VECTOR_STORE_BACKEND"] == "pgvector"
+          assert backend_env["DATABASE_URL"] == (
+              "postgresql+psycopg://course_rag:ci-only-placeholder@db:5432/course_rag"
+          )
+          assert "course_rag:course_rag" not in backend_env["DATABASE_URL"]
+
+          # Persistent volumes.
+          def has_named_volume(name, source, target):
+              return any(
+                  volume.get("type") == "volume"
+                  and volume.get("source") == source
+                  and volume.get("target") == target
+                  for volume in services[name].get("volumes", [])
+              )
+
+          assert has_named_volume("db", "postgres-data", "/var/lib/postgresql/data")
+          assert has_named_volume("backend", "rag-runtime", "/app/data/runtime")
+          assert has_named_volume("backend", "huggingface-cache", "/cache/huggingface")
+          caddy_volumes = services["caddy"]["volumes"]
+          caddyfile = [v for v in caddy_volumes if v["target"] == "/etc/caddy/Caddyfile"]
+          assert caddyfile and caddyfile[0].get("type") == "bind"
+          assert caddyfile[0].get("read_only") is True
+          assert has_named_volume("caddy", "caddy-data", "/data")
+          assert has_named_volume("caddy", "caddy-config", "/config")
+
+          volumes = config["volumes"]
+          assert volumes["postgres-data"]["name"] == "course-rag-postgres-data"
+          assert volumes["rag-runtime"]["name"] == "course-rag-runtime"
+          assert volumes["huggingface-cache"]["name"] == "course-rag-huggingface-cache"
+          assert volumes["caddy-data"]["name"] == "course-rag-caddy-data"
+          assert volumes["caddy-config"]["name"] == "course-rag-caddy-config"
+
+          # Restart policies.
+          for name in ("db", "backend", "frontend", "caddy"):
+              assert services[name].get("restart") == "unless-stopped", name
+          assert services["migrate"].get("restart") == "no"
+
+          # Startup dependencies.
+          assert services["migrate"]["depends_on"]["db"]["condition"] == "service_healthy"
+          assert services["backend"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
+          assert services["backend"]["depends_on"]["db"]["condition"] == "service_healthy"
+          assert services["caddy"]["depends_on"]["backend"]["condition"] == "service_healthy"
+          assert services["caddy"]["depends_on"]["frontend"]["condition"] == "service_healthy"
+
+          # Container hardening on every production service.
+          for name in ("db", "migrate", "backend", "frontend", "caddy"):
+              assert "no-new-privileges:true" in services[name].get("security_opt", []), name
+
+          # Bounded log rotation.
+          for name in ("db", "backend", "frontend", "caddy"):
+              options = services[name]["logging"]["options"]
+              assert options.get("max-size") == "10m", name
+              assert options.get("max-file") == "3", name
+
+          # One-shot migration service.
+          assert services["migrate"]["command"] == ["alembic", "upgrade", "head"]
+
+          print("production compose assertions passed")
+          PY
+
+      # Required production secrets must fail fast: with an empty
+      # POSTGRES_PASSWORD, DOMAIN, DATABASE_URL, or LLM_API_KEY the rendered
+      # production config must error instead of silently inheriting an unsafe
+      # local default.
+      - name: Production required-secret fail-fast check
+        run: |
+          for var in POSTGRES_PASSWORD DOMAIN DATABASE_URL LLM_API_KEY; do
+            sed "s/^${var}=.*/${var}=/" /tmp/course-rag-prod-ci.env \
+              > "/tmp/course-rag-empty-${var}.env"
+            if docker compose \
+              --env-file "/tmp/course-rag-empty-${var}.env" \
+              -f compose.yaml \
+              -f compose.pgvector.yaml \
+              -f compose.prod.yaml \
+              config --quiet; then
+              echo "expected production config to fail with empty ${var}"
+              exit 1
+            fi
+          done
+          echo "all required-secret fail-fast checks passed"
+
+      # Validates the production Caddyfile with the exact Caddy image used by
+      # the production stack.  No certificate is requested and nothing is
+      # started: `caddy validate` only parses and checks the configuration.
+      - name: Validate production Caddyfile
+        run: |
+          CADDY_IMAGE=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          config = json.loads(
+              Path("/tmp/course-rag-prod-compose.json").read_text(encoding="utf-8")
+          )
+          print(config["services"]["caddy"]["image"])
+          PY
+          )
+          test -n "$CADDY_IMAGE"
+          echo "validating with image: $CADDY_IMAGE"
+          docker run --rm \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e DOMAIN=rag.example.com \
+            "$CADDY_IMAGE" \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      # .env.production must never be tracked; example env files stay tracked.
+      - name: Assert production env is not tracked
+        run: |
+          if git ls-files | grep -qx '.env.production'; then
+            echo ".env.production must not be tracked by git"
+            exit 1
+          fi
+          git ls-files | grep -qx '.env.production.example'
+          git ls-files | grep -qx '.env.example'
+          echo "env tracking checks passed"
+
       # Compiles the Alembic migration chain to SQL without starting a real
       # PostgreSQL container: DATABASE_URL only needs to be a valid scheme,
       # and offline generation never opens a connection.
