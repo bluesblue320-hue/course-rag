@@ -1,0 +1,122 @@
+# Production single-host deployment override for course-rag.
+#
+# This file is layered on top of the base compose files:
+#
+#   docker compose \
+#     --env-file .env.production \
+#     -f compose.yaml \
+#     -f compose.pgvector.yaml \
+#     -f compose.prod.yaml \
+#     up -d --build
+#
+#   compose.yaml          base / local application (services db/backend/frontend)
+#   compose.pgvector.yaml switches the backend to PostgreSQL + pgvector
+#   compose.prod.yaml     production hardening + Caddy + migration service
+#
+# What this override does:
+#   - removes the frontend's host-published port (8080) entirely (ports: !reset)
+#   - adds the Caddy HTTPS reverse proxy as the only public application entry
+#   - adds a one-shot `migrate` service that runs `alembic upgrade head`
+#   - makes the backend wait for the migration service before starting
+#   - requires DOMAIN / POSTGRES_PASSWORD / DATABASE_URL / LLM_* explicitly
+#   - adds bounded json-file log rotation for long-running services
+#
+# Requires Docker Compose >= 2.24 (for the `!reset` ports reset semantics).
+# Local development (`docker compose up`) is unaffected by this file.
+
+services:
+  db:
+    # Production requires an explicit database password; the base compose
+    # default (course_rag) must never be silently inherited.
+    environment:
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+    # Bounded log rotation: the database logs permanently otherwise.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    # One-shot Alembic migration.  It never publishes ports, never starts
+    # FastAPI, never touches the LLM and never loads embedding models; it
+    # only runs `alembic upgrade head` against the production database.
+    image: course-rag-backend:local
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      # Required production connection string; the base compose local default
+      # is never acceptable here.
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    # Override every base default that could silently fall back to an unsafe
+    # local value in production.
+    environment:
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+      LLM_API_KEY: "${LLM_API_KEY:?LLM_API_KEY must be set}"
+      LLM_BASE_URL: "${LLM_BASE_URL:?LLM_BASE_URL must be set}"
+      LLM_MODEL: "${LLM_MODEL:?LLM_MODEL must be set}"
+    # The backend starts only after the migration service completed
+    # successfully (schema ready) and the database is healthy.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # Bounded log rotation; the backend logs forever otherwise.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    # Production removes the host-published ${APP_PORT:-8080}:80 mapping.
+    # The browser now reaches the frontend only through Caddy on ports 80/443.
+    ports: !reset []
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    # The only public application entry point: TLS termination, automatic
+    # HTTPS, and routing /api/* directly to the backend.
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DOMAIN: "${DOMAIN:?DOMAIN must be set}"
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      # Optional UDP 443 for HTTP/3.  Remove this line on providers that
+      # cannot publish UDP ports.
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+    name: course-rag-caddy-data
+  caddy-config:
+    name: course-rag-caddy-config
