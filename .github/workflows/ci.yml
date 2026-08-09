@@ -207,6 +207,10 @@ jobs:
           RAG_RERANKER_MODEL=
           RAG_RERANKER_CANDIDATE_TOP_K=15
           ENV
+          # Job-level offline defaults intentionally set DATABASE_URL and
+          # LLM_* empty. Process environment wins over --env-file, so clear
+          # those inherited values for this isolated production render.
+          unset DOMAIN POSTGRES_PASSWORD DATABASE_URL LLM_API_KEY LLM_BASE_URL LLM_MODEL
           docker compose \
             --env-file /tmp/course-rag-prod-ci.env \
             -f compose.yaml \
@@ -319,6 +323,7 @@ jobs:
       # local default.
       - name: Production required-secret fail-fast check
         run: |
+          unset DOMAIN POSTGRES_PASSWORD DATABASE_URL LLM_API_KEY LLM_BASE_URL LLM_MODEL
           for var in POSTGRES_PASSWORD DOMAIN DATABASE_URL LLM_API_KEY; do
             sed "s/^${var}=.*/${var}=/" /tmp/course-rag-prod-ci.env \
               > "/tmp/course-rag-empty-${var}.env"
