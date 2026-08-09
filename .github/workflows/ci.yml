@@ -263,6 +263,57 @@ jobs:
           )
           assert "course_rag:course_rag" not in backend_env["DATABASE_URL"]
 
+          # Every production backend process start must wait for the existing
+          # database connection and schema readiness checks before Uvicorn.
+          backend = services["backend"]
+          backend_command = "\n".join(backend["command"])
+          gate_source = backend_command.split("python - <<'PY'\n", 1)[1].split(
+              "\nPY\n", 1
+          )[0]
+          compile(gate_source, "<production-readiness-gate>", "exec")
+
+          for required in (
+              "create_database_engine",
+              "check_database_connection",
+              "check_database_schema",
+              "max_attempts = 60",
+              "retry_seconds = 2",
+              "SystemExit(1)",
+              "uvicorn",
+              "src.api:app",
+              "--host",
+              "0.0.0.0",
+              "--port",
+              "8000",
+          ):
+              assert required in backend_command, required
+          assert "alembic upgrade head" not in backend_command
+
+          # The command may reference the DATABASE_URL variable by name, but
+          # rendered secret values and unrelated secret variables must never
+          # be embedded in the process command or its logs.
+          assert backend_env["DATABASE_URL"] not in backend_command
+          assert "POSTGRES_PASSWORD" not in backend_command
+          assert "LLM_API_KEY" not in backend_command
+          assert "print(database_url" not in backend_command
+          assert "print(exc" not in backend_command
+          assert "repr(exc" not in backend_command
+
+          # Production health is semantic, not HTTP-only. A degraded 200 must
+          # fail unless the complete local RAG runtime initialized correctly.
+          health_test = "\n".join(backend["healthcheck"]["test"])
+          compile(backend["healthcheck"]["test"][-1], "<production-healthcheck>", "exec")
+          for required in (
+              "/health",
+              "status",
+              "ok",
+              "retrieval_ready",
+              "generation_ready",
+              "rag_ready",
+          ):
+              assert required in health_test, required
+          assert ".read()" not in health_test
+
           # Persistent volumes.
           def has_named_volume(name, source, target):
               return any(

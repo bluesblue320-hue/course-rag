@@ -153,6 +153,14 @@ caddy
 
 `migrate` 是一次性迁移服务：首次 `up` 时它会自动执行 `alembic upgrade head`，成功后退出（exit 0）。**迁移失败时 backend 不会启动**，避免在 schema 未就绪的情况下运行。
 
+Compose dependencies 负责首次部署的 `db healthy → migrate → backend` 顺序。除此之外，production backend 自身在**每次容器进程启动**时还有一层只读 readiness gate：
+
+1. 等待 PostgreSQL 可连接；
+2. 使用现有 schema 检查确认 Alembic revision、pgvector extension、`documents` 与 `chunks` 均已就绪；
+3. 检查通过后才以 `exec` 启动 Uvicorn。
+
+门禁不会执行 migration，也不会加载 Embedding 或调用 LLM。它最多尝试 60 次、重试间隔 2 秒；达到上限仍未就绪时进程以非零状态退出，由 `restart: unless-stopped` 重新尝试。这样 Docker daemon 重启、VPS reboot 或手工重启 backend 时，即使 Compose dependency orchestration 没有重新执行，FastAPI 也不会因抢先连接数据库而长期停留在 degraded storage 状态。
+
 首次启动会下载默认 Embedding 模型（写入 `huggingface-cache` 卷），耗时明显长于后续启动，属正常现象：
 
 ```bash
@@ -179,6 +187,19 @@ course-rag-backend  healthy
 course-rag-frontend healthy
 course-rag-caddy    running
 ```
+
+## Health readiness
+
+Local/base Compose 的 backend healthcheck 只验证 `/health` 的 HTTP 可达性。Production override 使用更严格的 semantic readiness probe，只有以下条件同时成立才判定容器 healthy：
+
+- `status == "ok"`
+- `retrieval_ready == true`
+- `generation_ready == true`
+- `rag_ready == true`
+
+因此，即使 degraded `/health` 仍返回 HTTP 200，也不会让 production backend 被 Docker 标记为 healthy，frontend/Caddy 的首次 Compose 启动依赖也不会提前通过。
+
+该探针只确认本地 production RAG runtime 已正确初始化；它**不会**实时探测远程 LLM provider 的网络可达性或服务状态。
 
 ## HTTPS
 
@@ -240,7 +261,13 @@ docker compose --env-file .env.production \
 sudo reboot
 ```
 
-重连后（服务 `restart: unless-stopped`，Docker 启动后会自动拉起）：
+长期运行的 `db` / `backend` / `frontend` / `caddy` 由 `restart: unless-stopped` 在 Docker daemon 启动后自动恢复。
+
+Docker daemon 直接恢复容器时不会重新执行 Compose 的 `depends_on` orchestration；production backend 因此在每次 process startup 都先运行 DB/schema readiness gate。PostgreSQL 启动较慢时，backend 会等待数据库可连接且 schema current，而不是直接启动为永久 degraded 的 FastAPI 进程。
+
+启动等待期间，`https://<DOMAIN>/api/*` 可能短暂返回 502/503。数据库就绪后，backend 启动 Uvicorn，semantic healthcheck 通过，Caddy 的反向代理会自动恢复，无需修改路由或手工重启 Caddy。
+
+重连后检查状态：
 
 ```bash
 docker compose --env-file .env.production \
@@ -373,6 +400,38 @@ docker compose --env-file .env.production \
 - 云平台安全组 + VPS 本机 UFW 都要放行 80/443
 - 用 `curl -I http://<DOMAIN>/` 确认 80 可达（应返回 308 跳转）
 - Caddy 无法监听 80/443 时不会完成证书申请
+
+### Backend keeps restarting
+
+如果 backend 在 production 中持续重启，先查看有界日志：
+
+```bash
+docker compose --env-file .env.production \
+  -f compose.yaml -f compose.pgvector.yaml -f compose.prod.yaml \
+  logs --tail=100 backend
+docker compose --env-file .env.production \
+  -f compose.yaml -f compose.pgvector.yaml -f compose.prod.yaml \
+  logs --tail=100 db
+```
+
+常见原因：
+
+- PostgreSQL 仍在启动
+- `DATABASE_URL` 错误或数据库不可达
+- `POSTGRES_PASSWORD` 与 `DATABASE_URL` 中的密码不一致
+- Alembic schema 不是当前 head
+- pgvector extension 或所需表缺失
+
+如果日志出现 `database readiness check failed after maximum attempts`，不要删除 healthcheck 或绕过 startup gate。应先修复数据库连接、凭据或 migration，再执行：
+
+```bash
+docker compose --env-file .env.production \
+  -f compose.yaml -f compose.pgvector.yaml -f compose.prod.yaml \
+  run --rm migrate
+docker compose --env-file .env.production \
+  -f compose.yaml -f compose.pgvector.yaml -f compose.prod.yaml \
+  up -d backend
+```
 
 ### backend unhealthy
 
