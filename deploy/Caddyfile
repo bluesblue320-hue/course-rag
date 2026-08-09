@@ -1,0 +1,45 @@
+# Production Caddy configuration for course-rag.
+#
+# Rendered by Caddy from the DOMAIN environment variable; this file must be
+# mounted read-only at /etc/caddy/Caddyfile in the caddy service.
+#
+# Routing:
+#   /api/*   -> backend:8000  (the /api prefix is stripped by handle_path,
+#                              so FastAPI still sees its original paths)
+#   everything else -> frontend:80 (Vue SPA + Nginx)
+#
+# Automatic HTTPS is handled by Caddy itself: it obtains and renews an ACME
+# certificate for $DOMAIN and redirects HTTP to HTTPS.  No certificate or
+# private key is stored in this repository.
+
+{$DOMAIN} {
+	# Compression for text payloads; zstd is preferred by Caddy, gzip is kept
+	# for legacy clients.
+	encode zstd gzip
+
+	# Uniform security headers for every response.  These do not restrict the
+	# Vue SPA, do not enable strict HSTS, and do not add an untested CSP.
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options SAMEORIGIN
+	}
+
+	# Canonicalize the API root before the wildcard route below.  This keeps
+	# /api itself out of the SPA fallback while preserving method semantics.
+	@apiRoot path /api
+	redir @apiRoot /api/ 308
+
+	# Keep the browser-facing /api URLs unchanged while stripping the /api
+	# prefix before proxying, matching the local Nginx behaviour.  FastAPI
+	# therefore continues to serve /health, /search, /ask and /documents.
+	handle_path /api/* {
+		reverse_proxy backend:8000
+	}
+
+	# Everything else goes to the Vue SPA served by the frontend Nginx.
+	handle {
+		reverse_proxy frontend:80
+	}
+}

@@ -1,0 +1,187 @@
+# Production single-host deployment override for course-rag.
+#
+# This file is layered on top of the base compose files:
+#
+#   docker compose \
+#     --env-file .env.production \
+#     -f compose.yaml \
+#     -f compose.pgvector.yaml \
+#     -f compose.prod.yaml \
+#     up -d --build
+#
+#   compose.yaml          base / local application (services db/backend/frontend)
+#   compose.pgvector.yaml switches the backend to PostgreSQL + pgvector
+#   compose.prod.yaml     production hardening + Caddy + migration service
+#
+# What this override does:
+#   - removes the frontend's host-published port (8080) entirely (ports: !reset)
+#   - adds the Caddy HTTPS reverse proxy as the only public application entry
+#   - adds a one-shot `migrate` service that runs `alembic upgrade head`
+#   - makes the backend wait for the migration service before starting
+#   - requires DOMAIN / POSTGRES_PASSWORD / DATABASE_URL / LLM_* explicitly
+#   - adds bounded json-file log rotation for long-running services
+#
+# Requires Docker Compose >= 2.24 (for the `!reset` ports reset semantics).
+# Local development (`docker compose up`) is unaffected by this file.
+
+services:
+  db:
+    # Production requires an explicit database password; the base compose
+    # default (course_rag) must never be silently inherited.
+    environment:
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+    # Bounded log rotation: the database logs permanently otherwise.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    # One-shot Alembic migration.  It never publishes ports, never starts
+    # FastAPI, never touches the LLM and never loads embedding models; it
+    # only runs `alembic upgrade head` against the production database.
+    image: course-rag-backend:local
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      # Required production connection string; the base compose local default
+      # is never acceptable here.
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    init: true
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    # Override every base default that could silently fall back to an unsafe
+    # local value in production.
+    environment:
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL must be set}"
+      LLM_API_KEY: "${LLM_API_KEY:?LLM_API_KEY must be set}"
+      LLM_BASE_URL: "${LLM_BASE_URL:?LLM_BASE_URL must be set}"
+      LLM_MODEL: "${LLM_MODEL:?LLM_MODEL must be set}"
+    # Docker restart policies do not replay Compose depends_on gates. Run a
+    # bounded, read-only DB/schema readiness check on every process start so
+    # Uvicorn cannot initialize permanently degraded during a host reboot.
+    command:
+      - sh
+      - -ec
+      - |
+        python - <<'PY'
+        import os
+        import time
+
+        from src.database.engine import (
+            check_database_connection,
+            check_database_schema,
+            create_database_engine,
+        )
+        from src.exceptions import (
+            DatabaseConnectionError,
+            DatabaseSchemaError,
+        )
+
+        database_url = os.environ["DATABASE_URL"]
+        max_attempts = 60
+        retry_seconds = 2
+        engine = create_database_engine(database_url)
+
+        try:
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    check_database_connection(engine)
+                    check_database_schema(
+                        engine,
+                        script_location="/app/migrations",
+                        alembic_config_path="/app/alembic.ini",
+                    )
+                except (DatabaseConnectionError, DatabaseSchemaError):
+                    if attempt >= max_attempts:
+                        print(
+                            "database readiness check failed after maximum attempts",
+                            flush=True,
+                        )
+                        raise SystemExit(1)
+                    print(
+                        f"database not ready; retrying ({attempt}/{max_attempts})",
+                        flush=True,
+                    )
+                    time.sleep(retry_seconds)
+                else:
+                    print("database readiness check passed", flush=True)
+                    break
+        finally:
+            engine.dispose()
+        PY
+        exec uvicorn src.api:app --host 0.0.0.0 --port 8000
+    # The backend starts only after the migration service completed
+    # successfully (schema ready) and the database is healthy.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # Production readiness is semantic: a degraded HTTP 200 must not mark
+    # the RAG backend healthy or allow dependent services to proceed.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >
+          import json, sys, urllib.request;
+          data = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5));
+          sys.exit(0 if (data.get('status') == 'ok' and data.get('retrieval_ready') is True and data.get('generation_ready') is True and data.get('rag_ready') is True) else 1)
+    # Bounded log rotation; the backend logs forever otherwise.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    # Production removes the host-published ${APP_PORT:-8080}:80 mapping.
+    # The browser now reaches the frontend only through Caddy on ports 80/443.
+    ports: !reset []
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  caddy:
+    # The only public application entry point: TLS termination, automatic
+    # HTTPS, and routing /api/* directly to the backend.
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      DOMAIN: "${DOMAIN:?DOMAIN must be set}"
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      # Optional UDP 443 for HTTP/3.  Remove this line on providers that
+      # cannot publish UDP ports.
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  caddy-data:
+    name: course-rag-caddy-data
+  caddy-config:
+    name: course-rag-caddy-config
